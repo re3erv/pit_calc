@@ -14,6 +14,10 @@ from PyQt5.QtCore import Qt
 from widgets import MplCanvas, HydraulicDataLoaderThread
 from core.hydraulic_core import calculate_pipeline
 from utils import timed
+from data.pipe_catalog import PIPE_CATALOG, get_pipe_type_names, get_default_params, get_steel_options_for_diameter, get_pe_params
+from data.zeta_catalog import get_zeta_for_type
+from core.geometry_utils import closest_point_on_polyline
+from core.utils import parse_float
 
 class HydraulicTab(QWidget):
     def __init__(self, parent_app):
@@ -22,28 +26,7 @@ class HydraulicTab(QWidget):
         self._poly_signal_connected = False
 
         # Словарь типов труб создаём до вызова _init_ui
-        self.pipe_catalog = {
-            "Сталь электросварная": {
-                "options": [
-                    {"d": 0.108, "t": 0.004, "rough": 0.00005, "r_min": 0.2},
-                    {"d": 0.159, "t": 0.005, "rough": 0.00005, "r_min": 0.3},
-                    {"d": 0.219, "t": 0.005, "rough": 0.00005, "r_min": 0.4},
-                    {"d": 0.273, "t": 0.005, "rough": 0.00005, "r_min": 0.5},
-                    {"d": 0.325, "t": 0.005, "rough": 0.00005, "r_min": 0.5},
-                    {"d": 0.426, "t": 0.006, "rough": 0.00005, "r_min": 0.6},
-                    {"d": 0.530, "t": 0.007, "rough": 0.00005, "r_min": 0.8},
-                ],
-                "sdr": None,
-                "rough": 0.00005,
-                "r_min_coeff": None,
-            },
-            **{f"ПЭ-100 SDR {sdr}": {
-                "sdr": sdr,
-                "diameters": [0.110, 0.125, 0.140, 0.160, 0.180, 0.200, 0.225, 0.250, 0.280, 0.315, 0.355, 0.400, 0.450, 0.500, 0.560, 0.630, 0.710, 0.800, 0.900, 1.000, 1.200],
-                "rough": 0.00001,
-                "r_min_coeff": 25,
-            } for sdr in [7.4, 9, 11, 13.6, 17, 17.6, 21, 26, 33, 41]}
-        }
+        self.pipe_catalog = PIPE_CATALOG
 
         self.polylines = []
         self.circles = []
@@ -350,7 +333,7 @@ class HydraulicTab(QWidget):
             # Круги на плане (используем допуск)
             snap_tol = self._get_snap_tolerance()
             for i, circle in enumerate(self.circles):
-                min_dist, _, _, _ = self.closest_point_on_polyline(circle['center'][:2], poly)
+                min_dist, _, _, _ = closest_point_on_polyline(circle['center'][:2], poly)
                 if min_dist < snap_tol:
                     cx, cy, _ = circle['center']
                     r = circle['radius']
@@ -383,7 +366,7 @@ class HydraulicTab(QWidget):
 
             # Круги на профиле
             for i, circle in enumerate(self.circles):
-                min_dist, _, seg_idx, t = self.closest_point_on_polyline(circle['center'][:2], poly)
+                min_dist, _, seg_idx, t = closest_point_on_polyline(circle['center'][:2], poly)
                 if min_dist < snap_tol:
                     proj_dist = 0.0
                     for j in range(seg_idx):
@@ -480,9 +463,9 @@ class HydraulicTab(QWidget):
                 try:
                     zeta = float(zeta_item.text().replace(',', '.'))
                 except:
-                    zeta = self.get_zeta_for_type(obj_type)
+                    zeta = get_zeta_for_type(obj_type)
                 circle = self.circles[circle_idx]
-                min_dist, _, seg_idx, t = self.closest_point_on_polyline(circle['center'][:2], poly)
+                min_dist, _, seg_idx, t = closest_point_on_polyline(circle['center'][:2], poly)
                 if min_dist < circle['radius'] * 2:
                     station = seg_idx + 1 if t > 0.5 else seg_idx
                     fittings.append({'station': station, 'k': zeta})
@@ -557,39 +540,6 @@ class HydraulicTab(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Ошибка расчёта: {e}")
 
-    def closest_point_on_polyline(self, point_xy, poly):
-        min_dist = float('inf')
-        best_proj = None
-        best_seg = 0
-        best_t = 0.0
-        for i in range(len(poly) - 1):
-            a = np.array(poly[i][:2])
-            b = np.array(poly[i+1][:2])
-            p = np.array(point_xy)
-            ab = b - a
-            if np.linalg.norm(ab) < 1e-12:
-                continue
-            t = np.dot(p - a, ab) / np.dot(ab, ab)
-            t = max(0.0, min(1.0, t))
-            proj = a + t * ab
-            dist = np.linalg.norm(p - proj)
-            if dist < min_dist:
-                min_dist = dist
-                best_proj = proj
-                best_seg = i
-                best_t = t
-        return min_dist, best_proj, best_seg, best_t
-
-    def get_zeta_for_type(self, obj_type):
-        zeta_dict = {
-            'всас': 0.5,
-            'выпуск': 1.0,
-            'обратный клапан': 2.0,
-            'задвижка': 0.3,
-            'переход диаметров': 0.2
-        }
-        return zeta_dict.get(obj_type, 0.5)
-
     @timed
     def _update_circles_table(self):
         self.circles_table.setRowCount(0)
@@ -598,7 +548,7 @@ class HydraulicTab(QWidget):
             return
         selected_poly = self.polylines[selected_idx]
         for i, circle in enumerate(self.circles):
-            min_dist, _, _, _ = self.closest_point_on_polyline(circle['center'][:2], selected_poly)
+            min_dist, _, _, _ = closest_point_on_polyline(circle['center'][:2], selected_poly)
             if min_dist >= self._get_snap_tolerance():
                 continue
             row = self.circles_table.rowCount()
@@ -612,7 +562,7 @@ class HydraulicTab(QWidget):
             combo.currentIndexChanged.connect(lambda _idx, row=row, combo=combo: self._update_zeta_from_type(row, combo))
             self.circles_table.setCellWidget(row, 1, combo)
             zeta_item = QTableWidgetItem()
-            zeta_item.setText(str(self.get_zeta_for_type(combo.currentText())))
+            zeta_item.setText(str(get_zeta_for_type(combo.currentText())))
             self.circles_table.setItem(row, 2, zeta_item)
             # Добавляем поле напора для всаса/выпуска
             nap_item = QTableWidgetItem()
@@ -633,7 +583,7 @@ class HydraulicTab(QWidget):
                 circle = self.circles[circle_idx]
                 nearby_count = 0
                 for poly in self.polylines:
-                    dist, _, _, _ = self.closest_point_on_polyline(circle['center'][:2], poly)
+                    dist, _, _, _ = closest_point_on_polyline(circle['center'][:2], poly)
                     if dist < circle['radius'] * 2:
                         nearby_count += 1
                 if nearby_count < 2:
@@ -643,7 +593,7 @@ class HydraulicTab(QWidget):
                     combo.setCurrentIndex(0)
                     combo.blockSignals(False)
                     return
-        zeta = self.get_zeta_for_type(type_text)
+        zeta = get_zeta_for_type(type_text)
         zeta_item = self.circles_table.item(row, 2)
         if zeta_item is not None:
             zeta_item.setText(str(zeta))
