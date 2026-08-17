@@ -138,6 +138,13 @@ class VolumeTab(QWidget):
         self.data_loader.start()
 
     def _on_data_loaded(self, mesh):
+        if mesh is None:
+            self.mesh = None
+            self.calc_btn.setEnabled(False)
+            self.height_btn.setEnabled(False)
+            self._log("⚠️ Загруженный DXF не содержит точек для построения поверхности.")
+            return
+
         self.mesh = mesh
         self.volume_cache.set_file(mesh.file_path)
         self.calc_btn.setEnabled(True)

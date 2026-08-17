@@ -92,6 +92,8 @@ class VolumeDataLoaderThread(QThread):
                 load_polylines=False,
                 load_circles=False
             )
+            if mesh is None:
+                self.progress_signal.emit("⚠️ Файл не содержит точек для рельефа")
             self.progress_signal.emit(f"✅ Загружено {len(mesh.x) if mesh else 0} точек")
             self.data_signal.emit(mesh)
             self.finished_signal.emit(True)
