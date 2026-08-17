@@ -40,13 +40,19 @@ class HydraulicTab(QWidget):
         self._default_params = {}
         self._default_pn = None   # дефолтное PN, МПа
         self._flow_unit_coeff = 1.0  # м³/с
-        self.last_hydraulic_result = None
-        self.last_result_poly_index = None
         # Хранилище параметров и ролей для каждой полилинии
         self.polyline_data = {}        
         self.loss_yellow_threshold = 0.01   # потери на метр, м/м
         self.min_pressure_excess = 2.0   # минимальный запас над трубой, м
         self._updating_zoom_sync = False
+        self._is_redrawing_plan = False
+        # Толщина серой подложки под полилиниями (в пунктах)
+        self.underlay_linewidth = 5
+        # Результаты расчётов для всех полилиний (idx -> result)
+        self.polyline_results = {}
+        # Параметры, при которых был выполнен последний расчёт (idx -> params_dict)
+        self.underlay_color = '#D3D3D3'   # светло-серый
+        self.last_calculated_params_by_poly = {}
 
         self._init_ui()
         
@@ -225,6 +231,7 @@ class HydraulicTab(QWidget):
         flow_speed_layout.addWidget(QLabel("Расход:"))
 
         self.flow_edit = QLineEdit("0.0278")
+        self.flow_edit.editingFinished.connect(self._check_params_dirty)
         self.flow_edit.setFixedWidth(80)
         flow_speed_layout.addWidget(self.flow_edit)
 
@@ -241,6 +248,7 @@ class HydraulicTab(QWidget):
 
         flow_speed_layout.addWidget(QLabel("Скорость:"))
         self.velocity_edit = QLineEdit("1.5")
+        self.velocity_edit.editingFinished.connect(self._check_params_dirty)
         self.velocity_edit.setFixedWidth(80)
         self.velocity_edit.setEnabled(False)
         flow_speed_layout.addWidget(self.velocity_edit)
@@ -265,6 +273,11 @@ class HydraulicTab(QWidget):
         self.check_pn_checkbox.setChecked(True)
         pipe_grid.addWidget(self.check_pn_checkbox, 11, 0, 1, 2)
 
+        self.temp_edit.editingFinished.connect(self._check_params_dirty)
+        self.min_angle_edit.editingFinished.connect(self._check_params_dirty)
+        self.pn_edit.editingFinished.connect(self._check_params_dirty)
+        self.min_pressure_edit.editingFinished.connect(self._check_params_dirty)
+
         # Кнопки сохранения параметров и проекта
         right_layout.addLayout(pipe_grid)
         save_buttons_layout = QHBoxLayout()
@@ -287,6 +300,11 @@ class HydraulicTab(QWidget):
         self.calc_hydraulic_btn.clicked.connect(lambda: self._run_hydraulic())
         self.calc_hydraulic_btn.setEnabled(False)
         right_layout.addWidget(self.calc_hydraulic_btn)
+
+        self.calc_all_btn = QPushButton("Рассчитать все полилинии")
+        self.calc_all_btn.clicked.connect(self._run_all_hydraulic)
+        self.calc_all_btn.setEnabled(False)
+        right_layout.addWidget(self.calc_all_btn)
 
         right_layout.addWidget(QLabel("Результаты"))
         self.hydraulic_result_text = QTextEdit()
@@ -345,15 +363,6 @@ class HydraulicTab(QWidget):
         if path:
             self.hydraulic_file_edit.setText(path)
 
-    def _on_poly_selected(self):
-        self.last_hydraulic_result = None
-        self.last_result_poly_index = None
-        self._update_polyline_display()
-        self._update_circles_table()
-        if hasattr(self, 'pressure_hist_canvas'):
-            self.pressure_hist_canvas.ax.clear()
-            self.pressure_hist_canvas.draw()
-
     def update_after_load(self):
         self.poly_combo.blockSignals(True)
         self.poly_combo.clear()
@@ -362,6 +371,7 @@ class HydraulicTab(QWidget):
         self.poly_combo.blockSignals(False)
 
         self.calc_hydraulic_btn.setEnabled(bool(self.polylines))
+        self.calc_all_btn.setEnabled(bool(self.polylines))
 
     def on_tab_activated(self):
         """Вызывается при переключении на вкладку «Гидравлика»."""
@@ -371,12 +381,12 @@ class HydraulicTab(QWidget):
 
     @timed
     def _update_polyline_display(self):
+        self._is_redrawing_plan = True
         try:
             if not self.polylines:
                 return
             ax_plan = self.plan_canvas.ax
             ax_plan.clear()
-            self.plan_canvas.ax.callbacks.connect('xlim_changed', self._on_plan_xlim_changed)
             selected_idx = self.poly_combo.currentData()
             if selected_idx is None or selected_idx < 0 or selected_idx >= len(self.polylines):
                 return
@@ -387,28 +397,50 @@ class HydraulicTab(QWidget):
             
             pn_head = self._get_pn_head() if has_result else 0.0
 
+            if has_result:
+                poly_for_display = self.last_hydraulic_result['points']
+            else:
+                poly_for_display = self.polylines[selected_idx]
+
             if show_all:
+
+
+
                 for idx, poly in enumerate(self.polylines):
-                    x_vals = [p[0] for p in poly]
-                    y_vals = [p[1] for p in poly]
-                    if idx == selected_idx and has_result:
-                        segments = self.last_hydraulic_result['segments']
-                        max_loss = max(seg['total_loss'] for seg in segments) if segments else 1e-9
+                    x_vals_bg = [p[0] for p in poly]
+                    y_vals_bg = [p[1] for p in poly]
+                    # Серая подложка (толще для выбранной полилинии)
+                    lw = self.underlay_linewidth + 2 if idx == selected_idx else self.underlay_linewidth
+                    ax_plan.plot(x_vals_bg, y_vals_bg,
+                                 color=self.underlay_color, linewidth=lw,
+                                 solid_capstyle='round', zorder=0)
+                    result_for_this = self.polyline_results.get(idx)
+                    if result_for_this is not None:
+                        # Рисуем цветные сегменты для этой полилинии
+                        segments = result_for_this['segments']
+                        pts = result_for_this['points']
+                        pn_head = self._get_pn_head()  # можно использовать текущий PN (одинаков для всех)
                         for seg in segments:
                             i = seg['index']
-                            x0, y0 = poly[i][0], poly[i][1]
-                            x1, y1 = poly[i+1][0], poly[i+1][1]
-                            color = self._get_segment_color(seg, pn_head)
+                            x0, y0 = pts[i][0], pts[i][1]
+                            x1, y1 = pts[i+1][0], pts[i+1][1]
+                            color = self._get_segment_color(seg, pn_head, result_for_this)
                             ax_plan.plot([x0, x1], [y0, y1], color=color, linewidth=3)
                     else:
-                        ax_plan.plot(x_vals, y_vals, color='gray', linewidth=0.5, alpha=0.4)
+                        x_vals = [p[0] for p in poly]
+                        y_vals = [p[1] for p in poly]
+                        ax_plan.plot(x_vals, y_vals, color=self.underlay_color, linewidth=0.5, alpha=0.4)
+
                 # После цикла устанавливаем poly для выбранной полилинии,
                 # чтобы профиль и круги использовали именно её
-                poly = self.polylines[selected_idx]
+                poly = poly_for_display
             else:
-                poly = self.polylines[selected_idx]
+                poly = poly_for_display
                 x_vals = [p[0] for p in poly]
                 y_vals = [p[1] for p in poly]
+                # Контур выбранной полилинии (серая подложка)
+                ax_plan.plot(x_vals, y_vals, color='gray', linewidth=self.underlay_linewidth,
+                             solid_capstyle='round', zorder=0)
                 if has_result:
                     # Рисуем сегменты с цветом в зависимости от потерь
                     segments = self.last_hydraulic_result['segments']
@@ -513,11 +545,10 @@ class HydraulicTab(QWidget):
                     ax_prof.text(proj_dist, z_max, f'O{i+1}', fontsize=8, color='orange', ha='center', va='bottom')
 
             self.profile_canvas.draw()
-
-            if has_result:
-                self._on_plan_xlim_changed(self.plan_canvas.ax)
         except Exception as e:
             self._log(f"Ошибка отрисовки: {e}")
+        finally:
+            self._is_redrawing_plan = False
 
     @timed
     def _run_hydraulic(self):
@@ -677,6 +708,17 @@ class HydraulicTab(QWidget):
 
             self.last_hydraulic_result = result
             self.last_result_poly_index = idx
+
+            # Синхронизируем min_pressure_excess с текстом поля, чтобы избежать ложной подсветки
+            try:
+                self.min_pressure_excess = float(self.min_pressure_edit.text().replace(',', '.'))
+            except (ValueError, TypeError):
+                pass  # оставляем текущее значение, если ввод некорректен
+
+            # Сохраняем результат и параметры для этой полилинии
+            self.polyline_results[idx] = result
+            self.last_calculated_params_by_poly[idx] = self._get_current_params()
+            self._clear_dirty_highlight()
             self._update_polyline_display()   # добавить эту строку
             self._update_pressure_histogram()
 
@@ -860,6 +902,7 @@ class HydraulicTab(QWidget):
         self.velocity_edit.setEnabled(checked)
         self.flow_edit.setEnabled(not checked)
         self.flow_unit_combo.setEnabled(not checked)
+        self._check_params_dirty()
 
     def _get_snap_tolerance(self):
         try:
@@ -926,6 +969,8 @@ class HydraulicTab(QWidget):
         self.rough_combo.blockSignals(False)
         self.r_min_combo.blockSignals(False)
 
+        self._check_params_dirty()
+
     def _on_outer_d_changed(self):
         type_name = self.pipe_type_combo.currentText()
         catalog = self.pipe_catalog.get(type_name)
@@ -933,6 +978,7 @@ class HydraulicTab(QWidget):
             self._update_pe_options(catalog["sdr"], catalog["rough"], catalog["r_min_coeff"])
         else:
             self._update_steel_options(catalog["options"])
+        self._check_params_dirty()
 
     def _update_pe_options(self, sdr, rough, r_min_coeff):
         d = self.outer_d_combo.currentData()
@@ -959,6 +1005,7 @@ class HydraulicTab(QWidget):
         self.wall_default_label.setText(f"по умолч.: {t*1000:.1f} мм")
         self.rough_default_label.setText(f"по умолч.: {rough*1000:.3f} мм")
         self.r_min_default_label.setText(f"по умолч.: {r_min:.2f} м")
+        self._check_params_dirty()
 
     def _update_steel_options(self, options):
         d = self.outer_d_combo.currentData()
@@ -975,10 +1022,12 @@ class HydraulicTab(QWidget):
         else:
             self.rough_combo.clear()
             self.r_min_combo.clear()
+        self._check_params_dirty()
 
     def _update_steel_finish(self, d, filtered):
         t = self.wall_combo.currentData()
         if d is None or t is None:
+            self._check_params_dirty()
             return
         for o in filtered:
             if abs(o["d"] - d) < 1e-9 and abs(o["t"] - t) < 1e-9:
@@ -997,6 +1046,7 @@ class HydraulicTab(QWidget):
                 self.wall_default_label.setText(f"по умолч.: {o['t']*1000:.1f} мм")
                 self.rough_default_label.setText(f"по умолч.: {o['rough']*1000:.3f} мм")
                 self.r_min_default_label.setText(f"по умолч.: {o['r_min']:.2f} м")
+                self._check_params_dirty()
                 break
     
     def _on_wall_changed(self):
@@ -1009,6 +1059,7 @@ class HydraulicTab(QWidget):
             if d is not None:
                 filtered = [o for o in catalog["options"] if abs(o["d"] - d) < 1e-9]
                 self._update_steel_finish(d, filtered)
+        self._check_params_dirty()
 
     def _get_combo_value(self, combo):
         """Возвращает числовое значение из QComboBox, поддерживая ручной ввод."""
@@ -1039,22 +1090,26 @@ class HydraulicTab(QWidget):
         if d is not None:
             self._set_combo_value(self.outer_d_combo, d)
             self._on_outer_d_changed()
+        self._check_params_dirty()
 
     def _reset_wall(self):
         w = self._default_params.get('wall')
         if w is not None:
             self._set_combo_value(self.wall_combo, w)
             self._on_wall_changed()
+        self._check_params_dirty()
 
     def _reset_rough(self):
         r = self._default_params.get('rough')
         if r is not None:
             self._set_combo_value(self.rough_combo, r)
+        self._check_params_dirty()
 
     def _reset_r_min(self):
         r = self._default_params.get('r_min')
         if r is not None:
             self._set_combo_value(self.r_min_combo, r)
+        self._check_params_dirty()
 
     def _on_flow_unit_changed(self):
         new_coeff = self.flow_unit_combo.currentData()
@@ -1070,10 +1125,12 @@ class HydraulicTab(QWidget):
             new_value = current_m3s / new_coeff
             self.flow_edit.setText(f"{new_value:.6f}")
         self._flow_unit_coeff = new_coeff
+        self._check_params_dirty()
     
     def _reset_pn(self):
         if self._default_pn is not None:
             self.pn_edit.setText(str(self._default_pn))
+        self._check_params_dirty()
 
     def _update_loss_thresholds(self):
         """Считывает пороги потерь из полей и обновляет атрибуты."""
@@ -1082,7 +1139,8 @@ class HydraulicTab(QWidget):
             self.loss_yellow_threshold = yellow
         if self.last_hydraulic_result is not None:
             self._update_polyline_display()
-    
+        self._check_params_dirty()
+
     def _update_pressure_histogram(self):
         """Строит гистограмму избыточного давления по узлам."""
         if not hasattr(self, 'pressure_hist_canvas') or self.last_hydraulic_result is None:
@@ -1102,8 +1160,6 @@ class HydraulicTab(QWidget):
         ax.set_title('Эпюра избыточного давления')
         ax.grid(True, linestyle='--', alpha=0.3)
         self.pressure_hist_canvas.draw()
-        if hasattr(self, 'plan_canvas') and self.last_hydraulic_result is not None:
-            self._on_plan_xlim_changed(self.plan_canvas.ax)
             
     def _get_pn_head(self):
         """Текущее PN в метрах водяного столба."""
@@ -1302,8 +1358,13 @@ class HydraulicTab(QWidget):
         new_idx = self.poly_combo.currentData()
         self._current_poly_index = new_idx
 
-        self.last_hydraulic_result = None
-        self.last_result_poly_index = None
+        # Загружаем последний результат для выбранной полилинии, если он есть
+        if new_idx in self.polyline_results:
+            self.last_hydraulic_result = self.polyline_results[new_idx]
+            self.last_result_poly_index = new_idx
+        else:
+            self.last_hydraulic_result = None
+            self.last_result_poly_index = None
 
         data = self.polyline_data.get(new_idx)
         if data:
@@ -1319,9 +1380,13 @@ class HydraulicTab(QWidget):
             self._update_circles_table()
 
         self._update_polyline_display()
-        if hasattr(self, 'pressure_hist_canvas'):
-            self.pressure_hist_canvas.ax.clear()
-            self.pressure_hist_canvas.draw()
+        if self.last_hydraulic_result is not None:
+            self._update_pressure_histogram()
+        else:
+            if hasattr(self, 'pressure_hist_canvas'):
+                self.pressure_hist_canvas.ax.clear()
+                self.pressure_hist_canvas.draw()
+        self._check_params_dirty()
 
     def _save_project_to_file(self):
         """Сохраняет параметры и роли всех полилиний в JSON."""
@@ -1413,7 +1478,7 @@ class HydraulicTab(QWidget):
             self._update_polyline_display()
             self._log("Проект загружен, но данные для выбранной полилинии отсутствуют")
 
-    def _get_segment_color(self, seg, pn_head):
+    def _get_segment_color(self, seg, pn_head, result=None):
         """Цвет сегмента:
            - красный: превышение PN
            - фиолетовый: вакуум (p < 0)
@@ -1421,11 +1486,13 @@ class HydraulicTab(QWidget):
            - жёлтый: большие местные потери
            - зелёный: норма
         """
+        if result is None:
+            result = self.last_hydraulic_result
         try:
             idx_start = seg['index']
             idx_end = idx_start + 1
-            points = self.last_hydraulic_result['points']
-            heads = self.last_hydraulic_result['station_heads']
+            points = result['points']
+            heads = result['station_heads']
             z_start = points[idx_start][2]
             z_end = points[idx_end][2]
             p_start = heads[idx_start] - z_start
@@ -1460,14 +1527,17 @@ class HydraulicTab(QWidget):
             self.min_pressure_excess = value
         if self.last_hydraulic_result is not None:
             self._update_polyline_display()
+        self._check_params_dirty()
 
-    def _get_segment_label(self, seg, pn_head):
+    def _get_segment_label(self, seg, pn_head, result=None):
         """Возвращает (текст, цвет) для подписи на сегменте профиля."""
+        if result is None:
+            result = self.last_hydraulic_result
         try:
             idx_start = seg['index']
             idx_end = idx_start + 1
-            points = self.last_hydraulic_result['points']
-            heads = self.last_hydraulic_result['station_heads']
+            points = result['points']
+            heads = result['station_heads']
             z_start = points[idx_start][2]
             z_end = points[idx_end][2]
             p_start = heads[idx_start] - z_start
@@ -1503,36 +1573,42 @@ class HydraulicTab(QWidget):
         return "", 'gray'
 
     def _setup_zoom_sync(self):
-        """Настраивает синхронизацию масштабов между планом, профилем и эпюрой."""
-        # Используем событие xlim_changed оси плана
-        self.plan_canvas.ax.callbacks.connect('xlim_changed', self._on_plan_xlim_changed)
+        if hasattr(self, '_zoom_sync_connected'):
+            return
+        self._zoom_sync_connected = True
+        # Используем draw_event – он вызывается после каждой отрисовки канваса,
+        # в том числе после интерактивного зума/панорамирования.
+        self.plan_canvas.mpl_connect('draw_event', self._on_plan_draw_event)
 
-    def _on_plan_xlim_changed(self, ax):
-        """Обрабатывает изменение пределов оси X плана и синхронизирует другие графики."""
+    def _on_plan_draw_event(self, event):
+        # Игнорируем события, вызванные программной перерисовкой
+        if getattr(self, '_is_redrawing_plan', False):
+            return
         if self._updating_zoom_sync:
             return
+
         self._updating_zoom_sync = True
         try:
             if not self.polylines or self.last_hydraulic_result is None:
                 return
-
             selected_idx = self.poly_combo.currentData()
             if selected_idx is None or selected_idx < 0:
                 return
+            if self.last_result_poly_index != selected_idx:
+                return
 
-            poly = self.polylines[selected_idx]
             result = self.last_hydraulic_result
-
-            # Получаем текущие пределы X плана
+            ax = self.plan_canvas.ax
             x_min, x_max = ax.get_xlim()
+            y_min, y_max = ax.get_ylim()
 
-            # Проходим по точкам полилинии, находим те, что попадают в окно
-            dists = result['station_distances']  # расстояния от начала до каждой точки
             points = result['points']
+            dists = result['station_distances']
 
             selected_dists = []
             for d, (x, y, z) in zip(dists, points):
-                if x_min <= x <= x_max:
+                # Проверяем попадание в прямоугольник выделения
+                if (x_min <= x <= x_max) and (y_min <= y <= y_max):
                     selected_dists.append(d)
 
             if not selected_dists:
@@ -1541,14 +1617,296 @@ class HydraulicTab(QWidget):
             min_dist = min(selected_dists)
             max_dist = max(selected_dists)
 
-            # Применяем новые пределы к профилю
+            # Обновляем пределы профиля и эпюры
             self.profile_canvas.ax.set_xlim(min_dist, max_dist)
-
-            # Применяем к эпюре избыточного давления
             self.pressure_hist_canvas.ax.set_xlim(min_dist, max_dist)
 
-            # Перерисовываем графики
-            self.profile_canvas.draw_idle()
-            self.pressure_hist_canvas.draw_idle()
+            self.profile_canvas.draw()
+            self.pressure_hist_canvas.draw()
         finally:
             self._updating_zoom_sync = False
+
+    def _compute_pipeline(self, idx, params, roles):
+        """
+        Выполняет гидравлический расчёт для полилинии idx по заданным параметрам
+        и ролям объектов. Возвращает результат расчёта или вызывает исключение.
+        """
+        poly = self.polylines[idx]
+        n_points = len(poly)
+
+        # Параметры трубы из сохранённых данных
+        outer_d = float(params.get('outer_d', 0))
+        wall = float(params.get('wall', 0))
+        rough = float(params.get('rough', 0))
+        r_min = float(params.get('r_min', 0))
+        if None in (outer_d, wall, rough, r_min) or outer_d <= 0 or wall <= 0 or rough <= 0 or r_min <= 0:
+            raise ValueError("Некорректные параметры трубы")
+
+        inner_d = outer_d - 2 * wall
+        area = math.pi * inner_d**2 / 4.0
+
+        # Расход/скорость
+        flow_mode = params.get('flow_mode', 'flow')
+        if flow_mode == 'velocity':
+            velocity = float(params.get('velocity_value', 0))
+            flow = velocity * area
+        else:
+            flow_value = float(params.get('flow_value', 0))
+            flow_unit_coeff = 1.0
+            # Восстанавливаем коэффициент единицы расхода
+            unit_text = params.get('flow_unit', 'м³/с')
+            if unit_text == 'м³/ч':
+                flow_unit_coeff = 1.0 / 3600.0
+            elif unit_text == 'м³/сут':
+                flow_unit_coeff = 1.0 / 86400.0
+            flow = flow_value * flow_unit_coeff
+
+        temp = float(params.get('temp', 15))
+        min_angle = float(params.get('min_angle', 1.0))
+
+        # Давление
+        check_pn = True  # или можно сохранять в params, но пока так
+        pn = None
+        if check_pn:
+            pn_mpa = float(params.get('pn_mpa', 1.0))
+            pn = pn_mpa * 1e6
+
+        pipe_params = {
+            'outer_diameter': outer_d,
+            'wall_thickness': wall,
+            'roughness': rough,
+            'r_min': r_min,
+        }
+
+        # Собираем objects_info на основе сохранённых ролей
+        objects_info = []
+        inlet_vertex = None
+        outlet_vertex = None
+        p_in_head = None
+        p_out_head = None
+
+        for role in roles:
+            circle_idx = role.get('circle_index')
+            if circle_idx is None or circle_idx >= len(self.circles):
+                continue
+            circle = self.circles[circle_idx]
+            obj_type = role.get('type', '')
+            if not obj_type:
+                continue
+
+            # Читаем напор, если задан
+            head_value = None
+            if obj_type in ('всас', 'выпуск'):
+                try:
+                    head_value = float(role.get('head', 0) or 0)
+                except (ValueError, TypeError):
+                    head_value = None
+
+            # Читаем ζ
+            try:
+                zeta = float(role.get('zeta', 0) or get_zeta_for_type(obj_type))
+            except (ValueError, TypeError):
+                zeta = get_zeta_for_type(obj_type)
+
+            # Привязываем к вершине полилинии
+            min_dist, _, seg_idx, t = closest_point_on_polyline(circle['center'][:2], poly)
+            if min_dist >= circle['radius'] * 2:
+                continue  # объект не привязан к этой полилинии
+
+            if t > 0.5:
+                vertex_index = seg_idx + 1
+            else:
+                vertex_index = seg_idx
+
+            if vertex_index >= n_points:
+                vertex_index = n_points - 1
+
+            objects_info.append({
+                'type': obj_type,
+                'vertex_index': vertex_index,
+                'zeta': zeta,
+                'head': head_value
+            })
+
+            if obj_type == 'всас':
+                inlet_vertex = vertex_index
+                p_in_head = head_value
+            elif obj_type == 'выпуск':
+                outlet_vertex = vertex_index
+                p_out_head = head_value
+
+        # Значения по умолчанию
+        if p_in_head is None:
+            p_in_head = 0.0
+        if p_out_head is None:
+            p_out_head = 1.0
+
+        # Определяем направление
+        reverse_needed = False
+        if inlet_vertex is not None and outlet_vertex is not None:
+            if inlet_vertex > outlet_vertex:
+                reverse_needed = True
+
+        # Разворачиваем полилинию при необходимости
+        if reverse_needed:
+            poly = list(reversed(poly))
+            n_points_rev = len(poly)
+            for obj in objects_info:
+                old_index = obj['vertex_index']
+                obj['vertex_index'] = (n_points - 1) - old_index
+
+        # Формируем fittings
+        fittings = []
+        for obj in objects_info:
+            fittings.append({
+                'station': obj['vertex_index'],
+                'k': obj['zeta'],
+                'obj_type': obj['type']
+            })
+
+        # Запускаем расчёт
+        result = calculate_pipeline(
+            poly,
+            pipe_params,
+            flow,
+            fluid_temp=temp,
+            check_pn=check_pn,
+            pn=pn,
+            min_angle_deg=min_angle,
+            fittings=fittings,
+            p_in_head=p_in_head,
+            p_out_head=p_out_head
+        )
+        return result
+
+    def _run_all_hydraulic(self):
+        """Расчёт всех полилиний по сохранённым параметрам."""
+        if not self.polylines:
+            QMessageBox.warning(self, "Ошибка", "Нет загруженных полилиний")
+            return
+
+        results = []
+        error_messages = []
+
+        for idx in range(len(self.polylines)):
+            try:
+                params = self.polyline_data.get(idx, {}).get('params', {})
+                roles = self.polyline_data.get(idx, {}).get('roles', [])
+                if not params:
+                    # Если данных нет, используем текущие параметры
+                    params = self._get_current_params()
+                result = self._compute_pipeline(idx, params, roles)
+                if result is not None:
+                    results.append((idx, result))
+                    self.polyline_results[idx] = result
+                    self.last_calculated_params_by_poly[idx] = params  # params из polyline_data
+            except Exception as e:
+                error_messages.append(f"Полилиния {idx+1}: {e}")
+
+        # Формируем сводный отчёт
+        lines = ["=== Сводный отчёт по всем полилиниям ===\n"]
+        if results:
+            for idx, res in results:
+                lines.append(
+                    f"Полилиния {idx+1}: "
+                    f"Q = {res.get('velocity', 0)*math.pi*res['inner_diameter']**2/4:.6f} м³/с, "
+                    f"H_треб = {res['required_head']:.2f} м, "
+                    f"Потери = {res['total_head_loss']:.2f} м, "
+                    f"Скорость = {res['velocity']:.2f} м/с"
+                )
+                if res.get('warnings'):
+                    lines.append("   Предупреждения:")
+                    for w in res['warnings']:
+                        lines.append(f"   - {w}")
+        else:
+            lines.append("Нет успешных расчётов.")
+        if error_messages:
+            lines.append("\nОшибки:")
+            for msg in error_messages:
+                lines.append(f"  {msg}")
+
+        self.hydraulic_result_text.setPlainText("\n".join(lines))
+
+        # Устанавливаем текущий результат для выбранной полилинии
+        # Устанавливаем текущий результат для выбранной полилинии
+        selected_idx = self.poly_combo.currentData()
+        if selected_idx is not None and selected_idx in self.polyline_results:
+            self.last_hydraulic_result = self.polyline_results[selected_idx]
+            self.last_result_poly_index = selected_idx
+        else:
+            self.last_hydraulic_result = None
+            self.last_result_poly_index = None
+
+        # Синхронизируем виджеты с параметрами выбранной полилинии
+        if selected_idx is not None and selected_idx in self.polyline_data:
+            self._apply_params(self.polyline_data[selected_idx]['params'])
+        self.min_pressure_edit.setText(str(self.min_pressure_excess))
+        self._clear_dirty_highlight()
+
+        # Обновляем отображение для текущей выбранной полилинии
+        self._update_polyline_display()
+        if self.last_hydraulic_result is not None:
+            self._update_pressure_histogram()
+        else:
+            if hasattr(self, 'pressure_hist_canvas'):
+                self.pressure_hist_canvas.ax.clear()
+                self.pressure_hist_canvas.draw()
+
+        self.min_pressure_edit.setText(str(self.min_pressure_excess))
+        self._clear_dirty_highlight()
+        self._log("Массовый расчёт завершён.")
+
+    def _clear_dirty_highlight(self):
+        """Сбрасывает подсветку изменённых полей."""
+        for widget_name in ['pipe_type_combo', 'outer_d_combo', 'wall_combo', 'rough_combo',
+                            'r_min_combo', 'flow_edit', 'flow_unit_combo', 'velocity_edit',
+                            'temp_edit', 'min_angle_edit', 'pn_edit', 'loss_yellow_edit',
+                            'min_pressure_edit']:
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setStyleSheet("")
+
+    def _check_params_dirty(self):
+        """Проверяет, изменились ли параметры с момента последнего расчёта, и подсвечивает их."""
+        idx = getattr(self, '_current_poly_index', None)
+        if idx is None:
+            return
+
+        last_params = self.last_calculated_params_by_poly.get(idx)
+        if last_params is None:
+            self._clear_dirty_highlight()
+            return
+
+        current_params = self._get_current_params()
+
+        compare_map = {
+            'pipe_type': 'pipe_type_combo',
+            'outer_d': 'outer_d_combo',
+            'wall': 'wall_combo',
+            'rough': 'rough_combo',
+            'r_min': 'r_min_combo',
+            'flow_mode': 'use_velocity_checkbox',
+            'flow_value': 'flow_edit',
+            'flow_unit': 'flow_unit_combo',
+            'velocity_value': 'velocity_edit',
+            'temp': 'temp_edit',
+            'min_angle': 'min_angle_edit',
+            'pn_mpa': 'pn_edit',
+            'loss_yellow': 'loss_yellow_edit',
+            'min_pressure': 'min_pressure_edit',
+        }
+
+        dirty_widgets = set()
+        for key, widget_name in compare_map.items():
+            old_val = last_params.get(key)
+            new_val = current_params.get(key)
+            if str(old_val) != str(new_val):
+                dirty_widgets.add(widget_name)
+
+        for widget_name in compare_map.values():
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                if widget_name in dirty_widgets:
+                    widget.setStyleSheet("background-color: #FFF3CD;")
+                else:
+                    widget.setStyleSheet("")
