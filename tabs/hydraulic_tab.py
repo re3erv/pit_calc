@@ -70,6 +70,9 @@ class HydraulicTab(QWidget):
         left_layout.addWidget(self.plan_canvas)
         left_layout.addWidget(QLabel("Продольный профиль"))
         left_layout.addWidget(self.profile_canvas)
+        left_layout.addWidget(QLabel("Эпюра избыточного давления"))
+        self.pressure_hist_canvas = MplCanvas(self, width=5, height=2)
+        left_layout.addWidget(self.pressure_hist_canvas)
         main_splitter.addWidget(left_widget)
 
         # Правая часть
@@ -301,6 +304,9 @@ class HydraulicTab(QWidget):
         self.last_result_poly_index = None
         self._update_polyline_display()
         self._update_circles_table()
+        if hasattr(self, 'pressure_hist_canvas'):
+            self.pressure_hist_canvas.ax.clear()
+            self.pressure_hist_canvas.draw()
 
     def update_after_load(self):
         self.poly_combo.blockSignals(True)
@@ -549,7 +555,8 @@ class HydraulicTab(QWidget):
             self.last_hydraulic_result = result
             self.last_result_poly_index = idx
             self._update_polyline_display()   # добавить эту строку
-            
+            self._update_pressure_histogram()
+
             report = f"=== Гидравлический расчёт полилинии {idx+1} ===\n"
 
             # Формулы с подставленными значениями
@@ -912,3 +919,23 @@ class HydraulicTab(QWidget):
         # Перерисовываем, если есть результат расчёта
         if self.last_hydraulic_result is not None:
             self._update_polyline_display()
+    
+    def _update_pressure_histogram(self):
+        """Строит гистограмму избыточного давления по узлам."""
+        if not hasattr(self, 'pressure_hist_canvas') or self.last_hydraulic_result is None:
+            return
+        ax = self.pressure_hist_canvas.ax
+        ax.clear()
+        result = self.last_hydraulic_result
+        points = result['points']
+        heads = result['station_heads']
+        dists = result['station_distances']
+
+        p_excess = [heads[i] - points[i][2] for i in range(len(points))]
+
+        ax.bar(dists, p_excess, width=max(1.0, (dists[-1] - dists[0]) / len(dists) * 0.8))
+        ax.set_xlabel('Расстояние от начала, м')
+        ax.set_ylabel('Избыточное давление, м')
+        ax.set_title('Эпюра избыточного давления')
+        ax.grid(True, linestyle='--', alpha=0.3)
+        self.pressure_hist_canvas.draw()
