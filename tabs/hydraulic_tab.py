@@ -39,6 +39,10 @@ class HydraulicTab(QWidget):
         self._flow_unit_coeff = 1.0  # м³/с
         self.last_hydraulic_result = None
         self.last_result_poly_index = None
+        self.loss_yellow_threshold = 0.5   # потери сегмента, м
+        self.loss_red_threshold = 2.0      # потери сегмента, м
+        self.loss_yellow_edit.editingFinished.connect(self._update_loss_thresholds)
+        self.loss_red_edit.editingFinished.connect(self._update_loss_thresholds)
 
         self._init_ui()
         
@@ -184,6 +188,19 @@ class HydraulicTab(QWidget):
         self.min_angle_edit = QLineEdit("1.0")
         pipe_grid.addWidget(self.min_angle_edit, 7, 1)
 
+        # Пороги потерь для цветовой индикации
+        thresholds_layout = QHBoxLayout()
+        thresholds_layout.addWidget(QLabel("Жёлтый порог, м:"))
+        self.loss_yellow_edit = QLineEdit(str(self.loss_yellow_threshold))
+        self.loss_yellow_edit.setFixedWidth(70)
+        thresholds_layout.addWidget(self.loss_yellow_edit)
+        thresholds_layout.addWidget(QLabel("Красный порог, м:"))
+        self.loss_red_edit = QLineEdit(str(self.loss_red_threshold))
+        self.loss_red_edit.setFixedWidth(70)
+        thresholds_layout.addWidget(self.loss_red_edit)
+        thresholds_layout.addStretch()
+        right_layout.addLayout(thresholds_layout)
+
         # Расход и скорость в одной строке
         flow_speed_layout = QHBoxLayout()
 
@@ -326,7 +343,7 @@ class HydraulicTab(QWidget):
                             i = seg['index']
                             x0, y0 = poly[i][0], poly[i][1]
                             x1, y1 = poly[i+1][0], poly[i+1][1]
-                            color = self._get_loss_color(seg['total_loss'], max_loss)
+                            color = self._get_loss_color(seg['total_loss'])
                             ax_plan.plot([x0, x1], [y0, y1], color=color, linewidth=3)
                     else:
                         ax_plan.plot(x_vals, y_vals, color='gray', linewidth=0.5, alpha=0.4)
@@ -345,7 +362,7 @@ class HydraulicTab(QWidget):
                         i = seg['index']
                         x0, y0 = poly[i][0], poly[i][1]
                         x1, y1 = poly[i+1][0], poly[i+1][1]
-                        color = self._get_loss_color(seg['total_loss'], max_loss)
+                        color = self._get_loss_color(seg['total_loss'])
                         ax_plan.plot([x0, x1], [y0, y1], color=color, linewidth=3,
                                     solid_capstyle='round')
                 else:
@@ -390,7 +407,7 @@ class HydraulicTab(QWidget):
                     i = seg['index']
                     d0, d1 = dists[i], dists[i+1]
                     z0, z1 = z_vals[i], z_vals[i+1]
-                    color = self._get_loss_color(seg['total_loss'], max_loss)
+                    color = self._get_loss_color(seg['total_loss'])
                     ax_prof.plot([d0, d1], [z0, z1], color=color, linewidth=2)
                     # Подпись потерь на значимых участках
                     if seg['total_loss'] > 0.3 * max_loss:
@@ -865,14 +882,23 @@ class HydraulicTab(QWidget):
         if self._default_pn is not None:
             self.pn_edit.setText(str(self._default_pn))
 
-    def _get_loss_color(self, loss, max_loss):
-        """Возвращает цвет для потерь относительно max_loss."""
-        if max_loss <= 0:
-            return 'green'
-        ratio = loss / max_loss
-        if ratio < 0.1:
-            return 'green'
-        elif ratio < 0.3:
+    def _get_loss_color(self, loss, length=None):
+        """Возвращает цвет в зависимости от абсолютных потерь сегмента."""
+        if loss >= self.loss_red_threshold:
+            return 'red'
+        elif loss >= self.loss_yellow_threshold:
             return 'yellow'
         else:
-            return 'red'
+            return 'green'
+
+    def _update_loss_thresholds(self):
+        """Считывает пороги потерь из полей и обновляет атрибуты."""
+        yellow = parse_float(self.loss_yellow_edit.text(), self.loss_yellow_threshold)
+        red = parse_float(self.loss_red_edit.text(), self.loss_red_threshold)
+        if yellow is not None:
+            self.loss_yellow_threshold = yellow
+        if red is not None:
+            self.loss_red_threshold = red
+        # Перерисовываем, если есть результат расчёта
+        if self.last_hydraulic_result is not None:
+            self._update_polyline_display()
