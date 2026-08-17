@@ -125,6 +125,7 @@ def calculate_pipeline(points, pipe_params, flow_rate, fluid_temp=20.0,
     total_friction_loss = 0.0
     total_local_loss = 0.0
     total_zeta = 0.0
+    local_sources_by_segment = {}  # ключ – индекс сегмента, значение – список источников ζ
 
     # Расход и скорость
     Q = flow_rate
@@ -208,6 +209,8 @@ def calculate_pipeline(points, pipe_params, flow_rate, fluid_temp=20.0,
         if length < 1e-6:
             continue  # нулевой сегмент
         total_length += length
+        # Сбор источников местных потерь для этого сегмента
+        seg_sources = []
 
         # Потери по длине
         re = reynolds_number(V, d_inner, nu)
@@ -220,29 +223,46 @@ def calculate_pipeline(points, pipe_params, flow_rate, fluid_temp=20.0,
         total_friction_loss += h_friction
 
         if i > 0 and angles[i] > 0:
-            # Коэффициент для поворота
-            # Используем r_min для оценки R/D
             r_over_d = r_min / d_inner
             k_bend = bend_loss_coefficient(angles[i], r_over_d)
             h_local += local_loss(k_bend, V)
-            total_zeta += k_bend          # <-- добавьте
-            # Если рядом ещё поворот (расстояние < 5*D), увеличиваем коэффициент (п.2.8)
-            # Здесь пока не реализовано.
+            total_zeta += k_bend
+            seg_sources.append({
+                'type': 'поворот',
+                'angle_deg': angles[i],
+                'r_over_d': r_over_d,
+                'zeta': k_bend,
+                'head_loss': local_loss(k_bend, V)
+            })
 
         # Дополнительные местные сопротивления из fittings
         if fittings:
             for fit in fittings:
-                # Проверяем, относится ли к этому сегменту
                 if 'station' in fit and fit['station'] == i:
                     h_local += local_loss(fit['k'], V)
-                    total_zeta += fit['k']   # <-- добавьте
+                    total_zeta += fit['k']
+                    seg_sources.append({
+                        'type': 'арматура',
+                        'obj_type': fit.get('obj_type', 'неизвестно'),
+                        'zeta': fit['k'],
+                        'head_loss': local_loss(fit['k'], V)
+                    })
                 elif 'between' in fit and fit['between'] == (i, i+1):
                     h_local += local_loss(fit['k'], V)
-                    total_zeta += fit['k']   # <-- добавьте
+                    total_zeta += fit['k']
+                    seg_sources.append({
+                        'type': 'арматура',
+                        'obj_type': fit.get('obj_type', 'неизвестно'),
+                        'zeta': fit['k'],
+                        'head_loss': local_loss(fit['k'], V)
+                    })
         total_local_loss += h_local
         
         total_segment_loss = h_friction + h_local
         total_head_loss += total_segment_loss
+
+        if seg_sources:
+            local_sources_by_segment[i] = seg_sources
 
         segments.append({
             'index': i,
@@ -259,6 +279,8 @@ def calculate_pipeline(points, pipe_params, flow_rate, fluid_temp=20.0,
             'elevation_end': p2[2],
             'total_friction_loss': total_friction_loss,
             'total_local_loss': total_local_loss,
+            'total_zeta_seg': sum(s['zeta'] for s in seg_sources),
+            'local_sources': seg_sources,
         })
 
         # Расстояние от начала
@@ -310,7 +332,8 @@ def calculate_pipeline(points, pipe_params, flow_rate, fluid_temp=20.0,
         'total_head_loss': total_head_loss,
         'total_friction_loss': total_friction_loss,
         'total_local_loss': total_local_loss,
-        'total_zeta': total_zeta,   # <-- добавьте
+        'total_zeta': total_zeta,
+        'local_sources_by_segment': local_sources_by_segment,   # <-- добавить
         'required_head': required_head,
         'station_distances': station_distances,
         'station_heads': station_heads,

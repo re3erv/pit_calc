@@ -377,10 +377,12 @@ class HydraulicTab(QWidget):
                 # Подписи узлов остаются
                 step = max(1, len(poly) // 20)
                 for i in range(0, len(poly), step):
-                    ax_plan.annotate(f'({x_vals[i]:.1f}, {y_vals[i]:.1f})',
-                                     (x_vals[i], y_vals[i]),
-                                     textcoords="offset points", xytext=(0,5),
-                                     ha='center', fontsize=8)
+                    # Вертикальное расположение координат (одна под другой)
+                    label = f'X={x_vals[i]:.1f}\nY={y_vals[i]:.1f}\nZ={poly[i][2]:.1f}'
+                    ax_plan.annotate(label,
+                                    (x_vals[i], y_vals[i]),
+                                    textcoords="offset points", xytext=(0,5),
+                                    ha='center', fontsize=7)
 
             # Круги на плане (используем допуск)
             snap_tol = self._get_snap_tolerance()
@@ -437,9 +439,26 @@ class HydraulicTab(QWidget):
                                      ha='center', fontsize=7)
             else:
                 # Если нет расчёта, оставляем номер вершины
-                for i in range(0, len(poly), step):
-                    ax_prof.annotate(f'{i}', (dists[i], z_vals[i]),
-                                     textcoords="offset points", xytext=(0,5), ha='center', fontsize=8)
+                if has_result:
+                    # Накопленные потери к каждой точке
+                    cum_loss = [0.0]
+                    for seg in self.last_hydraulic_result['segments']:
+                        cum_loss.append(cum_loss[-1] + seg['total_loss'])
+
+                    for i in range(0, len(poly), step):
+                        head = self.last_hydraulic_result['station_heads'][i]
+                        loss = cum_loss[i] if i < len(cum_loss) else 0.0
+                        label = f'X={dists[i]:.1f}\nZ={z_vals[i]:.1f}\nΣH={loss:.2f} м'
+                        ax_prof.annotate(label,
+                                        (dists[i], z_vals[i]),
+                                        textcoords="offset points", xytext=(0,5),
+                                        ha='center', fontsize=7)
+                else:
+                    # Без расчёта – просто номер точки
+                    for i in range(0, len(poly), step):
+                        ax_prof.annotate(f'{i}', (dists[i], z_vals[i]),
+                                        textcoords="offset points", xytext=(0,5),
+                                        ha='center', fontsize=8)
             ax_prof.set_xlabel('Горизонтальное расстояние, м')
             ax_prof.set_ylabel('Отметка Z, м')
             ax_prof.set_title(f'Продольный профиль полилинии {selected_idx+1}')
@@ -552,7 +571,7 @@ class HydraulicTab(QWidget):
                 min_dist, _, seg_idx, t = closest_point_on_polyline(circle['center'][:2], poly)
                 if min_dist < circle['radius'] * 2:
                     station = seg_idx + 1 if t > 0.5 else seg_idx
-                    fittings.append({'station': station, 'k': zeta})
+                    fittings.append({'station': station, 'k': zeta, 'obj_type': obj_type})
 
             if p_in_head is None:
                 p_in_head = 0.0
@@ -619,11 +638,41 @@ class HydraulicTab(QWidget):
             else:
                 report += "Предупреждений нет.\n"
 
-            report += "\nЭпюра напоров (узел, Z, напор, избыт. давление):\n"
+            report += "\nЭпюра напоров (узел, X, Y, Z, H, ΔZ, h_тр, h_м, P_изб):\n"
             for i, (pt, head) in enumerate(zip(result['points'], result['station_heads'])):
-                p_excess = head - pt[2]
-                report += f"  {i}: Z={pt[2]:.2f} м, H={head:.2f} м, P_изб={p_excess:.2f} м\n"
+                x = pt[0]
+                y = pt[1]
+                z = pt[2]
+                p_excess = head - z
 
+                if i == 0:
+                    dz = 0.0
+                    h_fric = 0.0
+                    h_loc = 0.0
+                else:
+                    prev_z = result['points'][i-1][2]
+                    dz = z - prev_z
+                    seg = result['segments'][i-1]
+                    h_fric = seg['friction_loss']
+                    h_loc = seg['local_loss']
+
+                report += (f"  {i}: X={x:.2f}, Y={y:.2f}, Z={z:.2f} м, H={head:.2f} м, "
+                           f"ΔZ={dz:+.2f} м, h_тр={h_fric:.2f} м, h_м={h_loc:.2f} м, "
+                           f"P_изб={p_excess:.2f} м\n")
+
+            report += "\nМестные сопротивления по сегментам:\n"
+            for seg_idx, sources in result.get('local_sources_by_segment', {}).items():
+                if not sources:
+                    continue
+                report += f"  Сегмент {seg_idx}:\n"
+                for src in sources:
+                    if src['type'] == 'поворот':
+                        report += (f"    - Поворот: угол={src['angle_deg']:.1f}°, "
+                                   f"R/D={src['r_over_d']:.2f}, ζ={src['zeta']:.3f}, "
+                                   f"h={src['head_loss']:.3f} м\n")
+                    else:
+                        report += (f"    - {src['obj_type']}: ζ={src['zeta']:.2f}, "
+                                   f"h={src['head_loss']:.3f} м\n")
             self.hydraulic_result_text.setPlainText(report)
             self._log("Гидравлический расчёт завершён.")
         except Exception as e:
