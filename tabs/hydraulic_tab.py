@@ -226,7 +226,7 @@ class HydraulicTab(QWidget):
         right_layout.addWidget(reset_params_btn)
 
         self.calc_hydraulic_btn = QPushButton("Рассчитать гидравлику")
-        self.calc_hydraulic_btn.clicked.connect(self._run_hydraulic)
+        self.calc_hydraulic_btn.clicked.connect(lambda: self._run_hydraulic())
         self.calc_hydraulic_btn.setEnabled(False)
         right_layout.addWidget(self.calc_hydraulic_btn)
 
