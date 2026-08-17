@@ -316,18 +316,18 @@ class HydraulicTab(QWidget):
                           self.last_result_poly_index == selected_idx)
 
             if show_all:
-                # Рисуем все полилинии
                 for idx, poly in enumerate(self.polylines):
                     x_vals = [p[0] for p in poly]
                     y_vals = [p[1] for p in poly]
-                    if idx == selected_idx:
-                        ax_plan.plot(x_vals, y_vals, 'o-', color='red', markersize=3,
-                                     linewidth=2, label=f'P{idx+1} (выбрана)')
-                        step = max(1, len(poly) // 20)
-                        for i in range(0, len(poly), step):
-                            ax_plan.annotate(f'{i}', (x_vals[i], y_vals[i]),
-                                             textcoords="offset points", xytext=(0,5),
-                                             ha='center', fontsize=8)
+                    if idx == selected_idx and has_result:
+                        segments = self.last_hydraulic_result['segments']
+                        max_loss = max(seg['total_loss'] for seg in segments) if segments else 1e-9
+                        for seg in segments:
+                            i = seg['index']
+                            x0, y0 = poly[i][0], poly[i][1]
+                            x1, y1 = poly[i+1][0], poly[i+1][1]
+                            color = self._get_loss_color(seg['total_loss'], max_loss)
+                            ax_plan.plot([x0, x1], [y0, y1], color=color, linewidth=3)
                     else:
                         ax_plan.plot(x_vals, y_vals, color='gray', linewidth=0.5, alpha=0.4)
                 # После цикла устанавливаем poly для выбранной полилинии,
