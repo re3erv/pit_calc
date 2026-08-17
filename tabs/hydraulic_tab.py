@@ -41,8 +41,6 @@ class HydraulicTab(QWidget):
         self.last_result_poly_index = None
         self.loss_yellow_threshold = 0.5   # потери сегмента, м
         self.loss_red_threshold = 2.0      # потери сегмента, м
-        self.loss_yellow_edit.editingFinished.connect(self._update_loss_thresholds)
-        self.loss_red_edit.editingFinished.connect(self._update_loss_thresholds)
 
         self._init_ui()
         
@@ -200,7 +198,9 @@ class HydraulicTab(QWidget):
         thresholds_layout.addWidget(self.loss_red_edit)
         thresholds_layout.addStretch()
         right_layout.addLayout(thresholds_layout)
-
+        self.loss_yellow_edit.editingFinished.connect(self._update_loss_thresholds)
+        self.loss_red_edit.editingFinished.connect(self._update_loss_thresholds)
+        
         # Расход и скорость в одной строке
         flow_speed_layout = QHBoxLayout()
 
