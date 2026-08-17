@@ -37,6 +37,8 @@ class HydraulicTab(QWidget):
         self._default_params = {}
         self._default_pn = None   # дефолтное PN, МПа
         self._flow_unit_coeff = 1.0  # м³/с
+        self.last_hydraulic_result = None
+        self.last_result_poly_index = None
 
         self._init_ui()
         
@@ -278,6 +280,8 @@ class HydraulicTab(QWidget):
             self.hydraulic_file_edit.setText(path)
 
     def _on_poly_selected(self):
+        self.last_hydraulic_result = None
+        self.last_result_poly_index = None
         self._update_polyline_display()
         self._update_circles_table()
 
@@ -307,7 +311,8 @@ class HydraulicTab(QWidget):
             if selected_idx is None or selected_idx < 0 or selected_idx >= len(self.polylines):
                 return
 
-            show_all = self.show_all_checkbox.isChecked()
+            has_result = (self.last_hydraulic_result is not None and
+                        self.last_result_poly_index == selected_idx)
 
             if show_all:
                 # Рисуем все полилинии
@@ -331,13 +336,26 @@ class HydraulicTab(QWidget):
                 poly = self.polylines[selected_idx]
                 x_vals = [p[0] for p in poly]
                 y_vals = [p[1] for p in poly]
-                ax_plan.plot(x_vals, y_vals, 'o-', color='red', markersize=3,
-                             linewidth=2, label=f'P{selected_idx+1}')
+                if has_result:
+                    # Рисуем сегменты с цветом в зависимости от потерь
+                    segments = self.last_hydraulic_result['segments']
+                    max_loss = max(seg['total_loss'] for seg in segments) if segments else 1e-9
+                    for seg in segments:
+                        i = seg['index']
+                        x0, y0 = poly[i][0], poly[i][1]
+                        x1, y1 = poly[i+1][0], poly[i+1][1]
+                        color = self._get_loss_color(seg['total_loss'], max_loss)
+                        ax_plan.plot([x0, x1], [y0, y1], color=color, linewidth=3,
+                                    solid_capstyle='round')
+                else:
+                    ax_plan.plot(x_vals, y_vals, 'o-', color='red', markersize=3,
+                                linewidth=2, label=f'P{selected_idx+1}')
+                # Подписи узлов остаются
                 step = max(1, len(poly) // 20)
                 for i in range(0, len(poly), step):
                     ax_plan.annotate(f'{i}', (x_vals[i], y_vals[i]),
-                                     textcoords="offset points", xytext=(0,5),
-                                     ha='center', fontsize=8)
+                                    textcoords="offset points", xytext=(0,5),
+                                    ha='center', fontsize=8)
 
             # Круги на плане (используем допуск)
             snap_tol = self._get_snap_tolerance()
@@ -364,10 +382,26 @@ class HydraulicTab(QWidget):
                 d = np.linalg.norm(np.array(poly[i]) - np.array(poly[i-1]))
                 dists.append(dists[-1] + d)
             z_vals = [p[2] for p in poly]
-            ax_prof.plot(dists, z_vals, 'o-', color='blue', markersize=3)
+            if has_result:
+                segments = self.last_hydraulic_result['segments']
+                max_loss = max(seg['total_loss'] for seg in segments) if segments else 1e-9
+                for seg in segments:
+                    i = seg['index']
+                    d0, d1 = dists[i], dists[i+1]
+                    z0, z1 = z_vals[i], z_vals[i+1]
+                    color = self._get_loss_color(seg['total_loss'], max_loss)
+                    ax_prof.plot([d0, d1], [z0, z1], color=color, linewidth=2)
+                    # Подпись потерь на значимых участках
+                    if seg['total_loss'] > 0.3 * max_loss:
+                        ax_prof.text((d0+d1)/2, (z0+z1)/2,
+                                    f"{seg['total_loss']:.2f} м",
+                                    fontsize=7, color='red', ha='center', va='bottom')
+            else:
+                ax_prof.plot(dists, z_vals, 'o-', color='blue', markersize=3)
+            # Подписи узлов (можно оставить, чтобы не путать с подписями потерь)
             for i in range(0, len(poly), step):
                 ax_prof.annotate(f'{i}', (dists[i], z_vals[i]),
-                                 textcoords="offset points", xytext=(0,5), ha='center', fontsize=8)
+                                textcoords="offset points", xytext=(0,5), ha='center', fontsize=8)
             ax_prof.set_xlabel('Горизонтальное расстояние, м')
             ax_prof.set_ylabel('Отметка Z, м')
             ax_prof.set_title(f'Продольный профиль полилинии {selected_idx+1}')
@@ -491,6 +525,10 @@ class HydraulicTab(QWidget):
                                         p_in_head=p_in_head,
                                         p_out_head=p_out_head)
 
+            self.last_hydraulic_result = result
+            self.last_result_poly_index = idx
+            self._update_polyline_display()   # добавить эту строку
+            
             report = f"=== Гидравлический расчёт полилинии {idx+1} ===\n"
 
             # Формулы с подставленными значениями
@@ -825,3 +863,15 @@ class HydraulicTab(QWidget):
     def _reset_pn(self):
         if self._default_pn is not None:
             self.pn_edit.setText(str(self._default_pn))
+
+    def _get_loss_color(self, loss, max_loss):
+        """Возвращает цвет для потерь относительно max_loss."""
+        if max_loss <= 0:
+            return 'green'
+        ratio = loss / max_loss
+        if ratio < 0.1:
+            return 'green'
+        elif ratio < 0.3:
+            return 'yellow'
+        else:
+            return 'red'
