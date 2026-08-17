@@ -110,7 +110,7 @@ class HydraulicTab(QWidget):
         # Выбор типа трубы
         pipe_grid.addWidget(QLabel("Тип трубы:"), 0, 0)
         self.pipe_type_combo = QComboBox()
-        self.pipe_type_combo.addItems(sorted(self.pipe_catalog.keys()))
+        self.pipe_type_combo.addItems(get_pipe_type_names())
         self.pipe_type_combo.currentIndexChanged.connect(self._on_pipe_type_changed)
         pipe_grid.addWidget(self.pipe_type_combo, 0, 1)
 
@@ -633,6 +633,11 @@ class HydraulicTab(QWidget):
         catalog = self.pipe_catalog.get(type_name)
         if not catalog:
             return
+
+        # Обновляем номинальное давление
+        pn_default = catalog.get("pn_mpa")
+        if pn_default is not None:
+            self.pn_edit.setText(str(pn_default))
 
         self.outer_d_combo.blockSignals(True)
         self.outer_d_combo.clear()
