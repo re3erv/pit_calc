@@ -509,7 +509,6 @@ class HydraulicTab(QWidget):
                 if not obj_type:
                     QMessageBox.warning(self, "Ошибка", "Не для всех объектов задан тип")
                     return
-                obj_type = combo.currentText() if combo else 'всас'
                 if obj_type == 'всас':
                     nap_item = self.circles_table.item(row, 3)
                     if nap_item and nap_item.text().strip():
@@ -645,13 +644,13 @@ class HydraulicTab(QWidget):
             self.circles_table.setItem(row, 3, nap_item)
 
     def _update_zeta_from_type(self, row, combo):
+        type_text = combo.currentText()
         if type_text == "":
             # очистить ζ
             zeta_item = self.circles_table.item(row, 2)
             if zeta_item is not None:
                 zeta_item.setText("")
             return
-        type_text = combo.currentText()
         if type_text == 'переход диаметров':
             obj_item = self.circles_table.item(row, 0)
             circle_idx = obj_item.data(Qt.UserRole)
