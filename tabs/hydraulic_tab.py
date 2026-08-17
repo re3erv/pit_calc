@@ -505,6 +505,10 @@ class HydraulicTab(QWidget):
                 if circle_idx is None or circle_idx >= len(self.circles):
                     continue
                 combo = self.circles_table.cellWidget(row, 1)
+                obj_type = combo.currentText() if combo else ''
+                if not obj_type:
+                    QMessageBox.warning(self, "Ошибка", "Не для всех объектов задан тип")
+                    return
                 obj_type = combo.currentText() if combo else 'всас'
                 if obj_type == 'всас':
                     nap_item = self.circles_table.item(row, 3)
@@ -622,8 +626,9 @@ class HydraulicTab(QWidget):
             item.setData(Qt.UserRole, i)
             self.circles_table.setItem(row, 0, item)
             combo = QComboBox()
+            combo.addItem("")  # пустой тип (не задан)
             combo.addItems(['всас', 'выпуск', 'обратный клапан', 'задвижка', 'переход диаметров'])
-            combo.setCurrentIndex(0)
+            combo.setCurrentIndex(0)   # по умолчанию пустой
             combo.currentIndexChanged.connect(lambda _idx, row=row, combo=combo: self._update_zeta_from_type(row, combo))
             self.circles_table.setCellWidget(row, 1, combo)
             zeta_item = QTableWidgetItem()
@@ -640,6 +645,12 @@ class HydraulicTab(QWidget):
             self.circles_table.setItem(row, 3, nap_item)
 
     def _update_zeta_from_type(self, row, combo):
+        if type_text == "":
+            # очистить ζ
+            zeta_item = self.circles_table.item(row, 2)
+            if zeta_item is not None:
+                zeta_item.setText("")
+            return
         type_text = combo.currentText()
         if type_text == 'переход диаметров':
             obj_item = self.circles_table.item(row, 0)
