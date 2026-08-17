@@ -62,25 +62,27 @@ def local_loss(k_coeff, velocity):
 
 def bend_loss_coefficient(angle_deg, r_over_d):
     """
-    Приближённый коэффициент местного сопротивления для отвода.
-    angle_deg: угол поворота в градусах (пространственный)
-    r_over_d: отношение радиуса гиба к диаметру трубы
-    Возвращает ζ.
+    Коэффициент местного сопротивления для плавного отвода.
+    Используется упрощённая формула: ζ = ζ90 * (θ / 90°), где ζ90 зависит от R/D.
+    Для R/D >= 20 ζ90 ≈ 0.08 (очень плавный изгиб).
     """
-    # Упрощённая зависимость: ζ = A * B, где A зависит от угла, B от R/D
-    # Для R/D >= 2 значения можно взять из таблиц, здесь упрощённо.
-    angle_rad = math.radians(angle_deg)
-    # Коэффициент для угла (примерно линейно для углов > 30°)
-    if angle_deg < 5:
+    if angle_deg < 5.0:
         return 0.0
-    base = 0.5 * (1 - math.cos(angle_rad))  # грубая аппроксимация
-    if r_over_d < 1.0:
-        correction = 3.0  # очень крутой поворот
-    elif r_over_d < 2.0:
-        correction = 1.5
+
+    if r_over_d >= 20:
+        zeta_90 = 0.08
+    elif r_over_d >= 10:
+        zeta_90 = 0.12
+    elif r_over_d >= 5:
+        zeta_90 = 0.20
+    elif r_over_d >= 2:
+        zeta_90 = 0.35
+    elif r_over_d >= 1:
+        zeta_90 = 0.70
     else:
-        correction = 1.0
-    return base * correction + 0.1  # добавим небольшую постоянную
+        zeta_90 = 1.20
+
+    return zeta_90 * (angle_deg / 90.0)
 
 # ---------- Основной расчёт ----------
 def calculate_pipeline(points, pipe_params, flow_rate, fluid_temp=20.0,
@@ -166,31 +168,24 @@ def calculate_pipeline(points, pipe_params, flow_rate, fluid_temp=20.0,
         p_prev = np.array(points[i-1])
         p_cur = np.array(points[i])
         p_next = np.array(points[i+1])
-        v1 = p_prev - p_cur
-        v2 = p_next - p_cur
-        # косинус угла между направлениями (векторы от узла к соседям)
-        cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-12)
-        cos_angle = np.clip(cos_angle, -1.0, 1.0)
-        angle = math.degrees(math.acos(cos_angle))
-        # Угол поворота трассы (острый угол между направлениями)
-        # Направление потока: от i-1 к i, затем от i к i+1.
-        # Угол между векторами v1 (направлен от i к i-1) и v2 (от i к i+1) – это внешний угол.
-        # Мы хотим острый угол между направлением входящего и исходящего потоков.
-        # Лучше использовать угол между векторами (i-1 -> i) и (i -> i+1):
+
+        # Векторы направления "вперёд"
         vec_in = p_cur - p_prev
         vec_out = p_next - p_cur
+
         cos_angle_flow = np.dot(vec_in, vec_out) / (np.linalg.norm(vec_in) * np.linalg.norm(vec_out) + 1e-12)
         cos_angle_flow = np.clip(cos_angle_flow, -1.0, 1.0)
         angle_flow = math.degrees(math.acos(cos_angle_flow))
-        # Поворот – это отклонение от прямой, т.е. 180 - angle_flow, но если угол_flow = 180 (прямая), поворот=0.
-        turn_angle = 180.0 - angle_flow
+
+        # Угол поворота (отклонение от прямой). Для прямой angle_flow=0° → turn_angle=0°
+        turn_angle = angle_flow
+
         angles[i] = turn_angle
-        # Для очень малых углов (<1°) считаем, что поворота нет
+
+        # Фильтр шума: очень малые углы считаем нулевыми
         if turn_angle < min_angle_deg:
             angles[i] = 0.0
         else:
-            # Проверка радиуса гиба
-            # Мы не знаем фактический радиус, поэтому предполагаем, что труба может быть согнута с R = r_min
             r_over_d = r_min / d_inner
             if r_over_d < 1.0:
                 warnings.append(f"Узел {i}: минимальный радиус гиба меньше диаметра (R/D = {r_over_d:.2f})")
@@ -326,6 +321,9 @@ def calculate_pipeline(points, pipe_params, flow_rate, fluid_temp=20.0,
         points, station_heads, pn, check_pn, warnings
     )
 
+    if total_local_loss > 0.3 * total_friction_loss:
+        warnings.append(f"Местные потери ({total_local_loss:.2f} м) превышают 30% потерь на трение ({total_friction_loss:.2f} м) – проверьте коэффициенты ζ")
+        
     return {
         'segments': segments,
         'total_length': total_length,

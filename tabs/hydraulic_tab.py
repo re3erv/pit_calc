@@ -349,7 +349,7 @@ class HydraulicTab(QWidget):
                             i = seg['index']
                             x0, y0 = poly[i][0], poly[i][1]
                             x1, y1 = poly[i+1][0], poly[i+1][1]
-                            color = self._get_loss_color(seg['total_loss'])
+                            color = self._get_loss_color(seg['total_loss'], seg['length'])
                             ax_plan.plot([x0, x1], [y0, y1], color=color, linewidth=3)
                     else:
                         ax_plan.plot(x_vals, y_vals, color='gray', linewidth=0.5, alpha=0.4)
@@ -368,21 +368,42 @@ class HydraulicTab(QWidget):
                         i = seg['index']
                         x0, y0 = poly[i][0], poly[i][1]
                         x1, y1 = poly[i+1][0], poly[i+1][1]
-                        color = self._get_loss_color(seg['total_loss'])
+                        color = self._get_loss_color(seg['total_loss'], seg['length'])
                         ax_plan.plot([x0, x1], [y0, y1], color=color, linewidth=3,
                                     solid_capstyle='round')
                 else:
                     ax_plan.plot(x_vals, y_vals, 'o-', color='red', markersize=3,
                                 linewidth=2, label=f'P{selected_idx+1}')
-                # Подписи узлов остаются
-                step = max(1, len(poly) // 20)
-                for i in range(0, len(poly), step):
-                    # Вертикальное расположение координат (одна под другой)
-                    label = f'X={x_vals[i]:.1f}\nY={y_vals[i]:.1f}\nZ={poly[i][2]:.1f}'
-                    ax_plan.annotate(label,
-                                    (x_vals[i], y_vals[i]),
-                                    textcoords="offset points", xytext=(0,5),
-                                    ha='center', fontsize=7)
+                # Подписи только в ключевых точках
+                important_indices = set()
+                if has_result:
+                    # Точки смены цвета сегментов
+                    prev_color = None
+                    for seg in self.last_hydraulic_result['segments']:
+                        color = self._get_loss_color(seg['total_loss'], seg['length'])
+                        if color != prev_color:
+                            important_indices.add(seg['index'])
+                            prev_color = color
+                    # Начальная и конечная точки
+                    important_indices.add(0)
+                    important_indices.add(len(poly) - 1)
+                    # Точки с вакуумом или превышением PN
+                    for idx, head in enumerate(self.last_hydraulic_result['station_heads']):
+                        if idx >= len(poly):
+                            break
+                        z = poly[idx][2]
+                        if head < z or head - z > self._get_pn_head():
+                            important_indices.add(idx)
+                else:
+                    # Без расчёта – только начальная и конечная
+                    important_indices = {0, len(poly) - 1}
+
+                for i in sorted(important_indices):
+                    if 0 <= i < len(poly):
+                        label = f'X={x_vals[i]:.1f}\nY={y_vals[i]:.1f}\nZ={poly[i][2]:.1f}'
+                        ax_plan.annotate(label, (x_vals[i], y_vals[i]),
+                                         textcoords="offset points", xytext=(0,5),
+                                         ha='center', fontsize=7)
 
             # Круги на плане (используем допуск)
             snap_tol = self._get_snap_tolerance()
@@ -416,7 +437,7 @@ class HydraulicTab(QWidget):
                     i = seg['index']
                     d0, d1 = dists[i], dists[i+1]
                     z0, z1 = z_vals[i], z_vals[i+1]
-                    color = self._get_loss_color(seg['total_loss'])
+                    color = self._get_loss_color(seg['total_loss'], seg['length'])
                     ax_prof.plot([d0, d1], [z0, z1], color=color, linewidth=2)
                     # Подпись потерь на значимых участках
                     if seg['total_loss'] > 0.3 * max_loss:
@@ -425,40 +446,46 @@ class HydraulicTab(QWidget):
                                     fontsize=7, color='red', ha='center', va='bottom')
             else:
                 ax_prof.plot(dists, z_vals, 'o-', color='blue', markersize=3)
-            # Подписи узлов (можно оставить, чтобы не путать с подписями потерь)
+            # Подписи только в ключевых точках
+            important_indices = set()
             if has_result:
                 # Накопленные потери
                 cum_loss = [0.0]
                 for seg in self.last_hydraulic_result['segments']:
                     cum_loss.append(cum_loss[-1] + seg['total_loss'])
-                # Подписи H и потерь
-                for i in range(0, len(poly), step):
-                    ax_prof.annotate(f'H={self.last_hydraulic_result["station_heads"][i]:.2f} м\nΣ={cum_loss[i]:.2f} м',
-                                     (dists[i], z_vals[i]),
-                                     textcoords="offset points", xytext=(0,5),
-                                     ha='center', fontsize=7)
-            else:
-                # Если нет расчёта, оставляем номер вершины
-                if has_result:
-                    # Накопленные потери к каждой точке
-                    cum_loss = [0.0]
-                    for seg in self.last_hydraulic_result['segments']:
-                        cum_loss.append(cum_loss[-1] + seg['total_loss'])
 
-                    for i in range(0, len(poly), step):
+                # Точки смены цвета сегментов
+                prev_color = None
+                for seg in self.last_hydraulic_result['segments']:
+                    color = self._get_loss_color(seg['total_loss'], seg['length'])
+                    if color != prev_color:
+                        important_indices.add(seg['index'])
+                        prev_color = color
+                important_indices.add(0)
+                important_indices.add(len(poly) - 1)
+
+                # Точки с вакуумом
+                for idx, head in enumerate(self.last_hydraulic_result['station_heads']):
+                    if idx >= len(poly):
+                        break
+                    if head < z_vals[idx]:
+                        important_indices.add(idx)
+
+                for i in sorted(important_indices):
+                    if 0 <= i < len(poly):
                         head = self.last_hydraulic_result['station_heads'][i]
                         loss = cum_loss[i] if i < len(cum_loss) else 0.0
                         label = f'X={dists[i]:.1f}\nZ={z_vals[i]:.1f}\nΣH={loss:.2f} м'
-                        ax_prof.annotate(label,
-                                        (dists[i], z_vals[i]),
-                                        textcoords="offset points", xytext=(0,5),
-                                        ha='center', fontsize=7)
-                else:
-                    # Без расчёта – просто номер точки
-                    for i in range(0, len(poly), step):
+                        ax_prof.annotate(label, (dists[i], z_vals[i]),
+                                         textcoords="offset points", xytext=(0,5),
+                                         ha='center', fontsize=7)
+            else:
+                # Без расчёта – подписываем только начальную и конечную точки
+                for i in {0, len(poly) - 1}:
+                    if 0 <= i < len(poly):
                         ax_prof.annotate(f'{i}', (dists[i], z_vals[i]),
-                                        textcoords="offset points", xytext=(0,5),
-                                        ha='center', fontsize=8)
+                                         textcoords="offset points", xytext=(0,5),
+                                         ha='center', fontsize=8)
             ax_prof.set_xlabel('Горизонтальное расстояние, м')
             ax_prof.set_ylabel('Отметка Z, м')
             ax_prof.set_title(f'Продольный профиль полилинии {selected_idx+1}')
@@ -629,6 +656,11 @@ class HydraulicTab(QWidget):
             report += f"Суммарные потери: {result['total_head_loss']:.2f} м\n"
             report += f"  - на трение по длине: {result.get('total_friction_loss', 0):.2f} м\n"
             report += f"  - местные: {result.get('total_local_loss', 0):.2f} м\n"
+                        # Контрольная сумма слагаемых
+            check_sum = (poly[-1][2] - poly[0][2]) + p_out_head - p_in_head + result['total_friction_loss'] + result['total_local_loss']
+            report += f"Контрольная сумма: ΔZ + H_своб − H_вс + h_тр + h_м = "
+            report += f"({poly[-1][2]:.2f} − {poly[0][2]:.2f}) + {p_out_head:.2f} − {p_in_head:.2f} + {result['total_friction_loss']:.3f} + {result['total_local_loss']:.3f} = {check_sum:.3f} м\n"
+            report += f"Совпадение с H_треб: {'✅' if abs(check_sum - result['required_head']) < 0.01 else '❌'}\n\n"
             report += f"Требуемый напор насоса: {result['required_head']:.2f} м\n\n"
 
             if result['warnings']:
@@ -963,10 +995,13 @@ class HydraulicTab(QWidget):
             self.pn_edit.setText(str(self._default_pn))
 
     def _get_loss_color(self, loss, length=None):
-        """Возвращает цвет в зависимости от абсолютных потерь сегмента."""
-        if loss >= self.loss_red_threshold:
+        """Возвращает цвет в зависимости от удельных потерь (м/м)."""
+        if length is None or length <= 0:
+            return 'green'
+        specific_loss = loss / length
+        if specific_loss >= 0.05:   # красный порог, м/м (можно настроить)
             return 'red'
-        elif loss >= self.loss_yellow_threshold:
+        elif specific_loss >= 0.01: # жёлтый порог, м/м
             return 'yellow'
         else:
             return 'green'
@@ -1002,3 +1037,11 @@ class HydraulicTab(QWidget):
         ax.set_title('Эпюра избыточного давления')
         ax.grid(True, linestyle='--', alpha=0.3)
         self.pressure_hist_canvas.draw()
+
+    def _get_pn_head(self):
+        """Текущее PN в метрах водяного столба."""
+        try:
+            pn_mpa = parse_float(self.pn_edit.text(), 1.0)
+            return pn_mpa * 1e6 / (1000 * 9.81)
+        except:
+            return 101.94  # PN10
