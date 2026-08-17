@@ -45,6 +45,7 @@ class HydraulicTab(QWidget):
         self.polyline_data = {}        
         self.loss_yellow_threshold = 0.01   # потери на метр, м/м
         self.loss_red_threshold = 0.05      # потери на метр, м/м
+        self.min_pressure_excess = 2.0   # минимальный запас над трубой, м
 
         self._init_ui()
         
@@ -210,7 +211,17 @@ class HydraulicTab(QWidget):
         right_layout.addLayout(thresholds_layout)
         self.loss_yellow_edit.editingFinished.connect(self._update_loss_thresholds)
         self.loss_red_edit.editingFinished.connect(self._update_loss_thresholds)
-        
+
+        # Минимальный запас над трубой
+        min_pressure_layout = QHBoxLayout()
+        min_pressure_layout.addWidget(QLabel("Мин. запас над трубой, м:"))
+        self.min_pressure_edit = QLineEdit(str(self.min_pressure_excess))
+        self.min_pressure_edit.setFixedWidth(70)
+        min_pressure_layout.addWidget(self.min_pressure_edit)
+        min_pressure_layout.addStretch()
+        right_layout.addLayout(min_pressure_layout)
+        self.min_pressure_edit.editingFinished.connect(self._update_min_pressure_excess)
+
         # Расход и скорость в одной строке
         flow_speed_layout = QHBoxLayout()
 
@@ -374,6 +385,8 @@ class HydraulicTab(QWidget):
             show_all = self.show_all_checkbox.isChecked()
             has_result = (self.last_hydraulic_result is not None and
                           self.last_result_poly_index == selected_idx)
+            
+            pn_head = self._get_pn_head() if has_result else 0.0
 
             if show_all:
                 for idx, poly in enumerate(self.polylines):
@@ -386,7 +399,7 @@ class HydraulicTab(QWidget):
                             i = seg['index']
                             x0, y0 = poly[i][0], poly[i][1]
                             x1, y1 = poly[i+1][0], poly[i+1][1]
-                            color = self._get_loss_color(seg['total_loss'], seg['length'])
+                            color = self._get_segment_color(seg, pn_head)
                             ax_plan.plot([x0, x1], [y0, y1], color=color, linewidth=3)
                     else:
                         ax_plan.plot(x_vals, y_vals, color='gray', linewidth=0.5, alpha=0.4)
@@ -405,42 +418,12 @@ class HydraulicTab(QWidget):
                         i = seg['index']
                         x0, y0 = poly[i][0], poly[i][1]
                         x1, y1 = poly[i+1][0], poly[i+1][1]
-                        color = self._get_loss_color(seg['total_loss'], seg['length'])
+                        color = self._get_segment_color(seg, pn_head)
                         ax_plan.plot([x0, x1], [y0, y1], color=color, linewidth=3,
                                     solid_capstyle='round')
                 else:
-                    ax_plan.plot(x_vals, y_vals, 'o-', color='red', markersize=3,
+                    ax_plan.plot(x_vals, y_vals, 'o-', color='blue', markersize=3,
                                 linewidth=2, label=f'P{selected_idx+1}')
-                # Подписи только в ключевых точках
-                important_indices = set()
-                if has_result:
-                    # Точки смены цвета сегментов
-                    prev_color = None
-                    for seg in self.last_hydraulic_result['segments']:
-                        color = self._get_loss_color(seg['total_loss'], seg['length'])
-                        if color != prev_color:
-                            important_indices.add(seg['index'])
-                            prev_color = color
-                    # Начальная и конечная точки
-                    important_indices.add(0)
-                    important_indices.add(len(poly) - 1)
-                    # Точки с вакуумом или превышением PN
-                    for idx, head in enumerate(self.last_hydraulic_result['station_heads']):
-                        if idx >= len(poly):
-                            break
-                        z = poly[idx][2]
-                        if head < z or head - z > self._get_pn_head():
-                            important_indices.add(idx)
-                else:
-                    # Без расчёта – только начальная и конечная
-                    important_indices = {0, len(poly) - 1}
-
-                for i in sorted(important_indices):
-                    if 0 <= i < len(poly):
-                        label = f'X={x_vals[i]:.1f}\nY={y_vals[i]:.1f}\nZ={poly[i][2]:.1f}'
-                        ax_plan.annotate(label, (x_vals[i], y_vals[i]),
-                                         textcoords="offset points", xytext=(0,5),
-                                         ha='center', fontsize=7)
 
             # Круги на плане (используем допуск)
             snap_tol = self._get_snap_tolerance()
@@ -457,6 +440,12 @@ class HydraulicTab(QWidget):
             ax_plan.set_title(f'План трассы (полилиния {selected_idx+1})')
             ax_plan.axis('equal')
             ax_plan.grid(True, linestyle='--', alpha=0.3)
+            ax_plan.plot([], [], color='red', label='Превышение PN')
+            ax_plan.plot([], [], color='purple', label='Вакуум')
+            ax_plan.plot([], [], color='orange', label='Низкий запас')
+            ax_plan.plot([], [], color='yellow', label='Местные потери > порога')
+            ax_plan.plot([], [], color='green', label='Норма')
+            ax_plan.legend()          
             self.plan_canvas.draw()
 
             # Профиль (выбранная полилиния)
@@ -474,7 +463,7 @@ class HydraulicTab(QWidget):
                     i = seg['index']
                     d0, d1 = dists[i], dists[i+1]
                     z0, z1 = z_vals[i], z_vals[i+1]
-                    color = self._get_loss_color(seg['total_loss'], seg['length'])
+                    color = self._get_segment_color(seg, pn_head)
                     ax_prof.plot([d0, d1], [z0, z1], color=color, linewidth=2)
                     # Подпись потерь на значимых участках
                     if seg['total_loss'] > 0.3 * max_loss:
@@ -494,7 +483,7 @@ class HydraulicTab(QWidget):
                 # Точки смены цвета сегментов
                 prev_color = None
                 for seg in self.last_hydraulic_result['segments']:
-                    color = self._get_loss_color(seg['total_loss'], seg['length'])
+                    color = self._get_segment_color(seg, pn_head)
                     if color != prev_color:
                         important_indices.add(seg['index'])
                         prev_color = color
@@ -666,42 +655,41 @@ class HydraulicTab(QWidget):
             else:
                 lambda_ = 0.0
 
-            report += "\n--- Расчётные формулы ---\n"
-            report += "1) Расход и скорость:\n"
+            report += f"\n   Внутренний диаметр d = {d:.6f} м\n"
+            report += f"   Z_вход = {poly[0][2]:.2f} м, Z_выход = {poly[-1][2]:.2f} м, ΔZ = {poly[-1][2]-poly[0][2]:+.2f} м\n"
+            report += f"   Длина L = {L:.2f} м\n"
+            report += f"   H_своб = {p_out_head:.2f} м\n"
+            report += f"   H_вс = {p_in_head:.2f} м\n"
+
+            report += "\n1) Расход и скорость:\n"
             report += "   V = Q / (π·d²/4)\n"
 
             if self.use_velocity_checkbox.isChecked():
                 # Режим задания скорости
                 report += f"   Скорость задана: V = {velocity:.3f} м/с\n"
-                report += f"   Q = V·(π·d²/4) = {velocity:.3f} · (3.1416 · {d:.6f}² / 4) = {flow:.6f} м³/с\n"
+                report += f"   Q = V·(π·d²/4) = {velocity:.3f} · (3.1416 · {d:.6f}² / 4) = {flow:.6f} м³/с = {flow * 3600:.4f} м³/ч = {flow * 3600:.4f} м³/ч = {flow * 86400:.4f} м³/сут\n"
             else:
                 # Режим задания расхода
                 flow_input = float(self.flow_edit.text().replace(',', '.'))
                 flow_unit_text = self.flow_unit_combo.currentText()
-                report += f"   Заданный расход: Q = {flow_input:.6f} {flow_unit_text}\n"
-                # Пересчёт во все размерности
-                if flow_unit_text != "м³/с":
-                    report += f"   Q = {flow:.6f} м³/с\n"
-                if flow_unit_text != "м³/ч":
-                    report += f"   Q = {flow * 3600:.4f} м³/ч\n"
-                if flow_unit_text != "м³/сут":
-                    report += f"   Q = {flow * 86400:.4f} м³/сут\n"
-                report += f"   V = Q / (π·d²/4) = {flow:.6f} / (3.1416 · {d:.6f}² / 4) = {V:.3f} м/с\n"
+                report += f"   Заданный расход: Q = {flow_input:.6f} {flow_unit_text}, Q = {flow * 3600:.4f} м³/ч, Q = {flow * 86400:.4f} м³/сут\n"
+                report += f"   V = Q / (π·d²/4) = {flow:.6f} / (3.1416 · {d:.6f}² / 4) = {V:.3f} м/с\n\n"
 
             report += f"2) Потери на трение (Дарси–Вейсбах):\n"
             report += f"   h_тр = λ · (L/d) · (V²/(2g))\n"
             report += f"   λ = {lambda_:.4f}, L = {L:.2f} м, d = {d:.6f} м, V = {V:.3f} м/с, g = 9.81 м/с²\n"
             report += f"   h_тр = {lambda_:.4f} · ({L:.2f}/{d:.6f}) · ({V:.3f}²/(2·9.81)) = {result['total_friction_loss']:.3f} м\n\n"
+
             report += f"3) Местные сопротивления:\n"
             report += f"   h_м = Σ ζ · (V²/(2g))\n"
             report += f"   Σ ζ = {result['total_zeta']:.3f}, V = {V:.3f} м/с\n"
             report += f"   h_м = {result['total_zeta']:.3f} · ({V:.3f}²/(2·9.81)) = {result['total_local_loss']:.3f} м\n\n"
+            
             report += f"4) Полный требуемый напор насоса:\n"
-            report += f"   H_треб = (Z_выход − Z_вход) + H_своб + h_тр + h_м\n"
-            report += f"   Z_вход = {poly[0][2]:.2f} м, Z_выход = {poly[-1][2]:.2f} м, H_своб = {p_out_head:.2f} м\n"
+            report += f"   H_треб = (Z_выход − Z_вход) + H_своб − H_вс + h_тр + h_м\n"
+            report += f"   Z_вход = {poly[0][2]:.2f} м, Z_выход = {poly[-1][2]:.2f} м, H_своб = {p_out_head:.2f} м, H_вс = {p_in_head:.2f} м\n"
             report += f"   h_тр = {result['total_friction_loss']:.3f} м, h_м = {result['total_local_loss']:.3f} м\n"
-            report += f"   H_треб = ({poly[-1][2]:.2f} − {poly[0][2]:.2f}) + {p_out_head:.2f} + {result['total_friction_loss']:.3f} + {result['total_local_loss']:.3f} = {result['required_head']:.3f} м\n"
-            report += "\n"
+            report += f"   H_треб = ({poly[-1][2]:.2f} − {poly[0][2]:.2f}) + {p_out_head:.2f} − ({p_in_head:.2f}) + {result['total_friction_loss']:.3f} + {result['total_local_loss']:.3f} = {result['required_head']:.3f} м\n"
 
             report += f"Длина: {result['total_length']:.2f} м\n"
             report += f"Внутренний диаметр: {result['inner_diameter']*1000:.1f} мм\n"
@@ -1050,17 +1038,6 @@ class HydraulicTab(QWidget):
         if self._default_pn is not None:
             self.pn_edit.setText(str(self._default_pn))
 
-    def _get_loss_color(self, loss, length=None):
-        if length is None or length <= 0:
-            return 'green'
-        specific_loss = loss / length
-        if specific_loss >= self.loss_red_threshold:
-            return 'red'
-        elif specific_loss >= self.loss_yellow_threshold:
-            return 'yellow'
-        else:
-            return 'green'
-
     def _update_loss_thresholds(self):
         """Считывает пороги потерь из полей и обновляет атрибуты."""
         yellow = parse_float(self.loss_yellow_edit.text(), self.loss_yellow_threshold)
@@ -1183,6 +1160,7 @@ class HydraulicTab(QWidget):
             'pn_mpa': self.pn_edit.text(),
             'loss_yellow': self.loss_yellow_edit.text(),
             'loss_red': self.loss_red_edit.text(),
+            'min_pressure': self.min_pressure_excess,
         }
 
     def _apply_params(self, params):
@@ -1228,6 +1206,10 @@ class HydraulicTab(QWidget):
             self.loss_yellow_edit.setText(params['loss_yellow'])
         if 'loss_red' in params:
             self.loss_red_edit.setText(params['loss_red'])
+        if 'min_pressure' in params:
+            self.min_pressure_excess = params['min_pressure']
+            if hasattr(self, 'min_pressure_edit'):
+                self.min_pressure_edit.setText(str(params['min_pressure']))
         self._toggle_velocity_input(self.use_velocity_checkbox.isChecked())
         self._update_loss_thresholds()
 
@@ -1399,3 +1381,51 @@ class HydraulicTab(QWidget):
             self._update_circles_table()
             self._update_polyline_display()
             self._log("Проект загружен, но данные для выбранной полилинии отсутствуют")
+
+    def _get_segment_color(self, seg, pn_head):
+        """Цвет сегмента:
+           - красный: превышение PN
+           - фиолетовый: вакуум (p < 0)
+           - оранжевый: низкий запас (0 <= p < min_pressure_excess)
+           - жёлтый: большие местные потери
+           - зелёный: норма
+        """
+        try:
+            idx_start = seg['index']
+            idx_end = idx_start + 1
+            points = self.last_hydraulic_result['points']
+            heads = self.last_hydraulic_result['station_heads']
+            z_start = points[idx_start][2]
+            z_end = points[idx_end][2]
+            p_start = heads[idx_start] - z_start
+            p_end = heads[idx_end] - z_end
+
+            # Превышение PN
+            if p_start > pn_head or p_end > pn_head:
+                return 'red'
+
+            # Вакуум (отрицательное избыточное давление)
+            if p_start < 0 or p_end < 0:
+                return 'purple'
+
+            # Низкий запас (меньше min_pressure_excess)
+            if p_start < self.min_pressure_excess or p_end < self.min_pressure_excess:
+                return 'orange'
+        except (KeyError, IndexError):
+            pass
+
+        # Большие местные потери (удельные)
+        if seg['length'] > 0:
+            specific_local_loss = seg['local_loss'] / seg['length']
+            if specific_local_loss >= self.loss_yellow_threshold:
+                return 'yellow'
+
+        return 'green'
+
+    def _update_min_pressure_excess(self):
+        """Считывает значение минимального запаса над трубой и обновляет атрибут."""
+        value = parse_float(self.min_pressure_edit.text(), self.min_pressure_excess)
+        if value is not None:
+            self.min_pressure_excess = value
+        if self.last_hydraulic_result is not None:
+            self._update_polyline_display()

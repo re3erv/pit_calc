@@ -11,7 +11,7 @@ from utils import timed
 
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=5, height=4, dpi=100):
-        self.fig, self.ax = plt.subplots(figsize=(width, height), dpi=dpi)
+        self.fig, self.ax = plt.subplots(figsize=(width, height), dpi=dpi, constrained_layout=True)
         super().__init__(self.fig)
         self.setParent(parent)
 
