@@ -35,6 +35,7 @@ class HydraulicTab(QWidget):
         self.dxf_file = ""
         self._updating_file_edits = False
         self._default_params = {}
+        self._default_pn = None   # дефолтное PN, МПа
         self._flow_unit_coeff = 1.0  # м³/с
 
         self._init_ui()
@@ -212,8 +213,16 @@ class HydraulicTab(QWidget):
 
         # PN и чекбокс
         pipe_grid.addWidget(QLabel("Номинальное давление PN, МПа:"), 10, 0)
+        pn_layout = QHBoxLayout()
         self.pn_edit = QLineEdit("1.0")
-        pipe_grid.addWidget(self.pn_edit, 10, 1)
+        pn_layout.addWidget(self.pn_edit)
+        self.pn_default_label = QLabel()
+        pn_layout.addWidget(self.pn_default_label)
+        self.pn_reset_btn = QPushButton("↺")
+        self.pn_reset_btn.setFixedWidth(30)
+        self.pn_reset_btn.clicked.connect(self._reset_pn)
+        pn_layout.addWidget(self.pn_reset_btn)
+        pipe_grid.addLayout(pn_layout, 10, 1)
 
         self.check_pn_checkbox = QCheckBox("Проверять превышение PN")
         self.check_pn_checkbox.setChecked(True)
@@ -637,7 +646,9 @@ class HydraulicTab(QWidget):
         # Обновляем номинальное давление
         pn_default = catalog.get("pn_mpa")
         if pn_default is not None:
+            self._default_pn = pn_default
             self.pn_edit.setText(str(pn_default))
+            self.pn_default_label.setText(f"по умолч.: {pn_default} МПа")
 
         self.outer_d_combo.blockSignals(True)
         self.outer_d_combo.clear()
@@ -810,3 +821,7 @@ class HydraulicTab(QWidget):
             new_value = current_m3s / new_coeff
             self.flow_edit.setText(f"{new_value:.6f}")
         self._flow_unit_coeff = new_coeff
+    
+    def _reset_pn(self):
+        if self._default_pn is not None:
+            self.pn_edit.setText(str(self._default_pn))
