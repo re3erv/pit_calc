@@ -311,8 +311,9 @@ class HydraulicTab(QWidget):
             if selected_idx is None or selected_idx < 0 or selected_idx >= len(self.polylines):
                 return
 
+            show_all = self.show_all_checkbox.isChecked()
             has_result = (self.last_hydraulic_result is not None and
-                        self.last_result_poly_index == selected_idx)
+                          self.last_result_poly_index == selected_idx)
 
             if show_all:
                 # Рисуем все полилинии
