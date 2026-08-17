@@ -266,7 +266,10 @@ class HydraulicTab(QWidget):
         self.save_project_btn = QPushButton("Сохранить проект")
         self.save_project_btn.clicked.connect(self._save_project_to_file)
         save_buttons_layout.addWidget(self.save_project_btn)
-        right_layout.addLayout(save_buttons_layout)        
+        self.load_project_btn = QPushButton("Загрузить проект")
+        self.load_project_btn.clicked.connect(self._load_project_from_file)
+        save_buttons_layout.addWidget(self.load_project_btn)
+        right_layout.addLayout(save_buttons_layout)
 
         reset_params_btn = QPushButton("Сбросить параметры к типу трубы")
         reset_params_btn.clicked.connect(self._on_pipe_type_changed)
@@ -1336,3 +1339,63 @@ class HydraulicTab(QWidget):
             self._log(f"Проект сохранён в {path}")
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить проект: {e}")
+
+    def _load_project_from_file(self):
+        """Загружает параметры и роли всех полилиний из JSON, сохраняя текущую выбранную."""
+        if not self.polylines:
+            QMessageBox.information(self, "Загрузка", "Сначала загрузите DXF с полилиниями")
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Загрузить проект", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                project = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось прочитать файл: {e}")
+            return
+
+        polylines_data = project.get('polylines', [])
+        if len(polylines_data) != len(self.polylines):
+            QMessageBox.warning(self, "Ошибка",
+                                f"Количество полилиний в проекте ({len(polylines_data)}) "
+                                f"не совпадает с текущим ({len(self.polylines)}).")
+            return
+
+        # Запоминаем текущую выбранную полилинию
+        current_idx = getattr(self, '_current_poly_index', 0)
+        if current_idx is None or current_idx < 0 or current_idx >= len(self.polylines):
+            current_idx = 0
+
+        # Заполняем polyline_data из файла
+        self.polyline_data = {}
+        for entry in polylines_data:
+            idx = entry.get('index')
+            if idx is not None and 0 <= idx < len(self.polylines):
+                self.polyline_data[idx] = {
+                    'params': entry.get('params', {}),
+                    'roles': entry.get('roles', [])
+                }
+
+        # Устанавливаем комбобокс на сохранённую полилинию, не вызывая _on_poly_selected
+        self.poly_combo.blockSignals(True)
+        self.poly_combo.setCurrentIndex(current_idx)
+        self.poly_combo.blockSignals(False)
+
+        self._current_poly_index = current_idx
+
+        # Применяем параметры и роли для выбранной полилинии
+        if current_idx in self.polyline_data:
+            self._apply_params(self.polyline_data[current_idx]['params'])
+            self._update_circles_table(roles=self.polyline_data[current_idx]['roles'])
+            self._update_polyline_display()
+            if hasattr(self, 'pressure_hist_canvas'):
+                self.pressure_hist_canvas.ax.clear()
+                self.pressure_hist_canvas.draw()
+            self._log(f"Проект загружен, выбрана полилиния {current_idx+1}")
+        else:
+            # Если данных для выбранной нет (например, пустой проект) – создать пустые
+            self._apply_params({})
+            self._update_circles_table()
+            self._update_polyline_display()
+            self._log("Проект загружен, но данные для выбранной полилинии отсутствуют")
