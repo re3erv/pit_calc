@@ -5,6 +5,8 @@ import numpy as np
 import matplotlib
 matplotlib.use('Qt5Agg')
 import matplotlib.pyplot as plt
+import json
+
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                              QPushButton, QTextEdit, QFileDialog, QMessageBox,
@@ -39,8 +41,10 @@ class HydraulicTab(QWidget):
         self._flow_unit_coeff = 1.0  # м³/с
         self.last_hydraulic_result = None
         self.last_result_poly_index = None
-        self.loss_yellow_threshold = 0.5   # потери сегмента, м
-        self.loss_red_threshold = 2.0      # потери сегмента, м
+        # Хранилище параметров и ролей для каждой полилинии
+        self.polyline_data = {}        
+        self.loss_yellow_threshold = 0.01   # потери на метр, м/м
+        self.loss_red_threshold = 0.05      # потери на метр, м/м
 
         self._init_ui()
         
@@ -101,6 +105,9 @@ class HydraulicTab(QWidget):
         self.circles_table.horizontalHeader().setStretchLastSection(True)
         self.circles_table.setMaximumHeight(150)
         right_layout.addWidget(self.circles_table)
+        self.save_roles_btn = QPushButton("Сохранить роли объектов")
+        self.save_roles_btn.clicked.connect(self._save_roles_to_file)
+        right_layout.addWidget(self.save_roles_btn)
 
         # Допуск привязки кругов
         snap_layout = QHBoxLayout()
@@ -191,12 +198,12 @@ class HydraulicTab(QWidget):
 
         # Пороги потерь для цветовой индикации
         thresholds_layout = QHBoxLayout()
-        thresholds_layout.addWidget(QLabel("Жёлтый порог, м:"))
-        self.loss_yellow_edit = QLineEdit(str(self.loss_yellow_threshold))
+        thresholds_layout.addWidget(QLabel("Жёлтый порог, м/м:"))
+        self.loss_yellow_edit = QLineEdit("0.01")
         self.loss_yellow_edit.setFixedWidth(70)
         thresholds_layout.addWidget(self.loss_yellow_edit)
-        thresholds_layout.addWidget(QLabel("Красный порог, м:"))
-        self.loss_red_edit = QLineEdit(str(self.loss_red_threshold))
+        thresholds_layout.addWidget(QLabel("Красный порог, м/м:"))
+        self.loss_red_edit = QLineEdit("0.05")
         self.loss_red_edit.setFixedWidth(70)
         thresholds_layout.addWidget(self.loss_red_edit)
         thresholds_layout.addStretch()
@@ -250,7 +257,16 @@ class HydraulicTab(QWidget):
         self.check_pn_checkbox.setChecked(True)
         pipe_grid.addWidget(self.check_pn_checkbox, 11, 0, 1, 2)
 
+        # Кнопки сохранения параметров и проекта
         right_layout.addLayout(pipe_grid)
+        save_buttons_layout = QHBoxLayout()
+        self.save_params_btn = QPushButton("Сохранить параметры водовода")
+        self.save_params_btn.clicked.connect(self._save_params_to_file)
+        save_buttons_layout.addWidget(self.save_params_btn)
+        self.save_project_btn = QPushButton("Сохранить проект")
+        self.save_project_btn.clicked.connect(self._save_project_to_file)
+        save_buttons_layout.addWidget(self.save_project_btn)
+        right_layout.addLayout(save_buttons_layout)        
 
         reset_params_btn = QPushButton("Сбросить параметры к типу трубы")
         reset_params_btn.clicked.connect(self._on_pipe_type_changed)
@@ -280,9 +296,27 @@ class HydraulicTab(QWidget):
 
     def _on_data_loaded(self, polylines, circles):
         self.polylines = polylines
-        self.circles = circles
+        self.circles = circles          # <-- сначала задаём круги
+
+        self.polyline_data = {}
+        for i in range(len(polylines)):
+            self.polyline_data[i] = {
+                'params': self._get_current_params(),
+                'roles': []
+            }
+
+        # Заполняем комбобокс полилиний
         self.update_after_load()
-        self.on_tab_activated()   # если вкладка активна, отрисовать
+
+        # Устанавливаем первую полилинию
+        self._current_poly_index = 0
+        self.poly_combo.blockSignals(True)
+        self.poly_combo.setCurrentIndex(0)
+        self.poly_combo.blockSignals(False)
+
+        # Теперь вызываем обработчик, который подхватит данные для индекса 0
+        self._on_poly_selected()
+        self.on_tab_activated()
 
     def _load_data(self):
         if not self.dxf_file or self.is_loading:
@@ -630,10 +664,27 @@ class HydraulicTab(QWidget):
                 lambda_ = 0.0
 
             report += "\n--- Расчётные формулы ---\n"
-            report += f"1) Расход и скорость:\n"
-            report += f"   V = Q / (π·d²/4)\n"
-            report += f"   d = {d:.6f} м, Q = {flow:.6f} м³/с\n"
-            report += f"   V = {flow:.6f} / (3.1416 · {d:.6f}² / 4) = {V:.3f} м/с\n\n"
+            report += "1) Расход и скорость:\n"
+            report += "   V = Q / (π·d²/4)\n"
+
+            if self.use_velocity_checkbox.isChecked():
+                # Режим задания скорости
+                report += f"   Скорость задана: V = {velocity:.3f} м/с\n"
+                report += f"   Q = V·(π·d²/4) = {velocity:.3f} · (3.1416 · {d:.6f}² / 4) = {flow:.6f} м³/с\n"
+            else:
+                # Режим задания расхода
+                flow_input = float(self.flow_edit.text().replace(',', '.'))
+                flow_unit_text = self.flow_unit_combo.currentText()
+                report += f"   Заданный расход: Q = {flow_input:.6f} {flow_unit_text}\n"
+                # Пересчёт во все размерности
+                if flow_unit_text != "м³/с":
+                    report += f"   Q = {flow:.6f} м³/с\n"
+                if flow_unit_text != "м³/ч":
+                    report += f"   Q = {flow * 3600:.4f} м³/ч\n"
+                if flow_unit_text != "м³/сут":
+                    report += f"   Q = {flow * 86400:.4f} м³/сут\n"
+                report += f"   V = Q / (π·d²/4) = {flow:.6f} / (3.1416 · {d:.6f}² / 4) = {V:.3f} м/с\n"
+
             report += f"2) Потери на трение (Дарси–Вейсбах):\n"
             report += f"   h_тр = λ · (L/d) · (V²/(2g))\n"
             report += f"   λ = {lambda_:.4f}, L = {L:.2f} м, d = {d:.6f} м, V = {V:.3f} м/с, g = 9.81 м/с²\n"
@@ -711,7 +762,7 @@ class HydraulicTab(QWidget):
             QMessageBox.critical(self, "Ошибка", f"Ошибка расчёта: {e}")
 
     @timed
-    def _update_circles_table(self):
+    def _update_circles_table(self, roles=None):
         self.circles_table.setRowCount(0)
         selected_idx = self.poly_combo.currentData() if self.poly_combo.count() > 0 else None
         if selected_idx is None or selected_idx >= len(self.polylines):
@@ -744,6 +795,8 @@ class HydraulicTab(QWidget):
             else:
                 nap_item.setText("")    # для других объектов не используется
             self.circles_table.setItem(row, 3, nap_item)
+        if roles:
+            self._apply_roles_to_table(roles)
 
     def _update_zeta_from_type(self, row, combo):
         type_text = combo.currentText()
@@ -995,13 +1048,12 @@ class HydraulicTab(QWidget):
             self.pn_edit.setText(str(self._default_pn))
 
     def _get_loss_color(self, loss, length=None):
-        """Возвращает цвет в зависимости от удельных потерь (м/м)."""
         if length is None or length <= 0:
             return 'green'
         specific_loss = loss / length
-        if specific_loss >= 0.05:   # красный порог, м/м (можно настроить)
+        if specific_loss >= self.loss_red_threshold:
             return 'red'
-        elif specific_loss >= 0.01: # жёлтый порог, м/м
+        elif specific_loss >= self.loss_yellow_threshold:
             return 'yellow'
         else:
             return 'green'
@@ -1045,3 +1097,242 @@ class HydraulicTab(QWidget):
             return pn_mpa * 1e6 / (1000 * 9.81)
         except:
             return 101.94  # PN10
+
+    def _save_roles_to_file(self):
+        """Сохраняет роли объектов текущей полилинии в JSON."""
+        if self.circles_table.rowCount() == 0:
+            QMessageBox.information(self, "Сохранение", "Нет объектов для сохранения")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить роли объектов", "", "JSON (*.json)")
+        if not path:
+            return
+        roles = []
+        for row in range(self.circles_table.rowCount()):
+            obj_item = self.circles_table.item(row, 0)
+            circle_idx = obj_item.data(Qt.UserRole)
+            combo = self.circles_table.cellWidget(row, 1)
+            obj_type = combo.currentText() if combo else ""
+            zeta_item = self.circles_table.item(row, 2)
+            zeta = zeta_item.text() if zeta_item else ""
+            nap_item = self.circles_table.item(row, 3)
+            nap = nap_item.text() if nap_item else ""
+            roles.append({
+                "circle_index": circle_idx,
+                "type": obj_type,
+                "zeta": zeta,
+                "head": nap,
+            })
+        data = {
+            "polyline_index": self.poly_combo.currentData(),
+            "polyline_name": self.poly_combo.currentText(),
+            "roles": roles,
+        }
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self._log(f"Роли объектов сохранены в {path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить файл: {e}")
+
+    def _save_params_to_file(self):
+        """Сохраняет параметры текущего водовода в JSON."""
+        try:
+            data = {
+                "polyline_index": self.poly_combo.currentData(),
+                "polyline_name": self.poly_combo.currentText(),
+                "pipe_type": self.pipe_type_combo.currentText(),
+                "outer_diameter": self.outer_d_combo.currentText(),
+                "wall_thickness": self.wall_combo.currentText(),
+                "roughness": self.rough_combo.currentText(),
+                "r_min": self.r_min_combo.currentText(),
+                "flow_mode": "velocity" if self.use_velocity_checkbox.isChecked() else "flow",
+                "flow_value": self.flow_edit.text(),
+                "flow_unit": self.flow_unit_combo.currentText(),
+                "velocity_value": self.velocity_edit.text(),
+                "temperature": self.temp_edit.text(),
+                "min_angle": self.min_angle_edit.text(),
+                "pn_mpa": self.pn_edit.text(),
+                "loss_yellow": self.loss_yellow_edit.text(),
+                "loss_red": self.loss_red_edit.text(),
+            }
+            path, _ = QFileDialog.getSaveFileName(self, "Сохранить параметры водовода", "", "JSON (*.json)")
+            if not path:
+                return
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self._log(f"Параметры сохранены в {path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить файл: {e}")
+
+    def _get_current_params(self):
+        return {
+            'pipe_type': self.pipe_type_combo.currentText(),
+            'outer_d': self.outer_d_combo.currentData(),   # числовое значение
+            'wall': self.wall_combo.currentData(),
+            'rough': self.rough_combo.currentData(),
+            'r_min': self.r_min_combo.currentData(),
+            'flow_mode': 'velocity' if self.use_velocity_checkbox.isChecked() else 'flow',
+            'flow_value': self.flow_edit.text(),
+            'flow_unit': self.flow_unit_combo.currentText(),
+            'velocity_value': self.velocity_edit.text(),
+            'temp': self.temp_edit.text(),
+            'min_angle': self.min_angle_edit.text(),
+            'pn_mpa': self.pn_edit.text(),
+            'loss_yellow': self.loss_yellow_edit.text(),
+            'loss_red': self.loss_red_edit.text(),
+        }
+
+    def _apply_params(self, params):
+        """Применяет сохранённые параметры к виджетам."""
+        if not params:
+            return
+        # Устанавливаем тип трубы (и блокируем сигналы, чтобы не перезаполнять комбобоксы лишний раз)
+        idx = self.pipe_type_combo.findText(params.get('pipe_type', ''))
+        if idx >= 0:
+            self.pipe_type_combo.blockSignals(True)
+            self.pipe_type_combo.setCurrentIndex(idx)
+            self.pipe_type_combo.blockSignals(False)
+            self._on_pipe_type_changed()
+        # Остальные параметры
+        if 'outer_d' in params:
+            self._set_combo_value(self.outer_d_combo, params['outer_d'])
+        if 'wall' in params:
+            self._set_combo_value(self.wall_combo, params['wall'])
+        if 'rough' in params:
+            self._set_combo_value(self.rough_combo, params['rough'])
+        if 'r_min' in params:
+            self._set_combo_value(self.r_min_combo, params['r_min'])       
+        if 'flow_value' in params:
+            self.flow_edit.setText(params['flow_value'])
+        if 'flow_unit' in params:
+            unit_idx = self.flow_unit_combo.findText(params['flow_unit'])
+            if unit_idx >= 0:
+                self.flow_unit_combo.blockSignals(True)
+                self.flow_unit_combo.setCurrentIndex(unit_idx)
+                self.flow_unit_combo.blockSignals(False)
+        self.use_velocity_checkbox.blockSignals(True)
+        self.use_velocity_checkbox.setChecked(params.get('flow_mode') == 'velocity')
+        self.use_velocity_checkbox.blockSignals(False)
+        if 'velocity_value' in params:
+            self.velocity_edit.setText(params['velocity_value'])
+        if 'temp' in params:
+            self.temp_edit.setText(params['temp'])
+        if 'min_angle' in params:
+            self.min_angle_edit.setText(params['min_angle'])
+        if 'pn_mpa' in params:
+            self.pn_edit.setText(params['pn_mpa'])
+        if 'loss_yellow' in params:
+            self.loss_yellow_edit.setText(params['loss_yellow'])
+        if 'loss_red' in params:
+            self.loss_red_edit.setText(params['loss_red'])
+        self._toggle_velocity_input(self.use_velocity_checkbox.isChecked())
+        self._update_loss_thresholds()
+
+    def _get_current_roles(self):
+        """Возвращает список ролей объектов для текущей таблицы."""
+        roles = []
+        for row in range(self.circles_table.rowCount()):
+            obj_item = self.circles_table.item(row, 0)
+            circle_idx = obj_item.data(Qt.UserRole)
+            combo = self.circles_table.cellWidget(row, 1)
+            obj_type = combo.currentText() if combo else ""
+            zeta_item = self.circles_table.item(row, 2)
+            zeta = zeta_item.text() if zeta_item else ""
+            nap_item = self.circles_table.item(row, 3)
+            nap = nap_item.text() if nap_item else ""
+            roles.append({
+                "circle_index": circle_idx,
+                "type": obj_type,
+                "zeta": zeta,
+                "head": nap,
+            })
+        return roles
+
+    def _apply_roles_to_table(self, roles):
+        """Применяет сохранённые роли к уже заполненной таблице."""
+        if not roles:
+            return
+        for row in range(self.circles_table.rowCount()):
+            obj_item = self.circles_table.item(row, 0)
+            circle_idx = obj_item.data(Qt.UserRole)
+            for role in roles:
+                if role['circle_index'] == circle_idx:
+                    combo = self.circles_table.cellWidget(row, 1)
+                    combo.blockSignals(True)
+                    type_idx = combo.findText(role['type'])
+                    if type_idx >= 0:
+                        combo.setCurrentIndex(type_idx)
+                    combo.blockSignals(False)
+                    zeta_item = self.circles_table.item(row, 2)
+                    if zeta_item:
+                        if role.get('zeta'):
+                            zeta_item.setText(role['zeta'])
+                        else:
+                            self._update_zeta_from_type(row, combo)
+                    nap_item = self.circles_table.item(row, 3)
+                    if nap_item:
+                        nap_item.setText(role.get('head', ''))
+                    break
+
+    def _on_poly_selected(self):
+        # Сохраняем данные предыдущей полилинии
+        prev_idx = getattr(self, '_current_poly_index', None)
+        if prev_idx is not None and prev_idx < len(self.polylines):
+            self.polyline_data[prev_idx] = {
+                'params': self._get_current_params(),
+                'roles': self._get_current_roles(),
+            }
+        # Загружаем данные новой
+        new_idx = self.poly_combo.currentData()
+        self._current_poly_index = new_idx
+
+        self.last_hydraulic_result = None
+        self.last_result_poly_index = None
+
+        data = self.polyline_data.get(new_idx)
+        if data:
+            self._apply_params(data.get('params', {}))
+            # таблицу заполним после обновления, с ролями
+            self._update_circles_table(roles=data.get('roles'))
+        else:
+            # При первом переключении или отсутствии данных – создаём запись с текущими параметрами
+            self.polyline_data[new_idx] = {
+                'params': self._get_current_params(),
+                'roles': []
+            }
+            self._update_circles_table()
+
+        self._update_polyline_display()
+        if hasattr(self, 'pressure_hist_canvas'):
+            self.pressure_hist_canvas.ax.clear()
+            self.pressure_hist_canvas.draw()
+
+    def _save_project_to_file(self):
+        """Сохраняет параметры и роли всех полилиний в JSON."""
+        try:
+            # Сохраняем данные текущей полилинии перед экспортом
+            if self._current_poly_index is not None:
+                self.polyline_data[self._current_poly_index] = {
+                    'params': self._get_current_params(),
+                    'roles': self._get_current_roles()
+                }
+            project = {
+                'polylines': []
+            }
+            valid_keys = [k for k in self.polyline_data.keys() if k is not None]
+            for idx in sorted(valid_keys):
+                entry = self.polyline_data[idx]
+                project['polylines'].append({
+                    'index': idx,
+                    'name': self.poly_combo.itemText(idx) if idx < self.poly_combo.count() else f"P{idx+1}",
+                    'params': entry['params'],
+                    'roles': entry['roles']
+                })
+            path, _ = QFileDialog.getSaveFileName(self, "Сохранить проект", "", "JSON (*.json)")
+            if not path:
+                return
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(project, f, ensure_ascii=False, indent=2)
+            self._log(f"Проект сохранён в {path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить проект: {e}")
