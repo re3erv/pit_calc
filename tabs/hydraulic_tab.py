@@ -377,9 +377,10 @@ class HydraulicTab(QWidget):
                 # Подписи узлов остаются
                 step = max(1, len(poly) // 20)
                 for i in range(0, len(poly), step):
-                    ax_plan.annotate(f'{i}', (x_vals[i], y_vals[i]),
-                                    textcoords="offset points", xytext=(0,5),
-                                    ha='center', fontsize=8)
+                    ax_plan.annotate(f'({x_vals[i]:.1f}, {y_vals[i]:.1f})',
+                                     (x_vals[i], y_vals[i]),
+                                     textcoords="offset points", xytext=(0,5),
+                                     ha='center', fontsize=8)
 
             # Круги на плане (используем допуск)
             snap_tol = self._get_snap_tolerance()
@@ -423,9 +424,22 @@ class HydraulicTab(QWidget):
             else:
                 ax_prof.plot(dists, z_vals, 'o-', color='blue', markersize=3)
             # Подписи узлов (можно оставить, чтобы не путать с подписями потерь)
-            for i in range(0, len(poly), step):
-                ax_prof.annotate(f'{i}', (dists[i], z_vals[i]),
-                                textcoords="offset points", xytext=(0,5), ha='center', fontsize=8)
+            if has_result:
+                # Накопленные потери
+                cum_loss = [0.0]
+                for seg in self.last_hydraulic_result['segments']:
+                    cum_loss.append(cum_loss[-1] + seg['total_loss'])
+                # Подписи H и потерь
+                for i in range(0, len(poly), step):
+                    ax_prof.annotate(f'H={self.last_hydraulic_result["station_heads"][i]:.2f} м\nΣ={cum_loss[i]:.2f} м',
+                                     (dists[i], z_vals[i]),
+                                     textcoords="offset points", xytext=(0,5),
+                                     ha='center', fontsize=7)
+            else:
+                # Если нет расчёта, оставляем номер вершины
+                for i in range(0, len(poly), step):
+                    ax_prof.annotate(f'{i}', (dists[i], z_vals[i]),
+                                     textcoords="offset points", xytext=(0,5), ha='center', fontsize=8)
             ax_prof.set_xlabel('Горизонтальное расстояние, м')
             ax_prof.set_ylabel('Отметка Z, м')
             ax_prof.set_title(f'Продольный профиль полилинии {selected_idx+1}')
