@@ -47,7 +47,7 @@ class HydraulicTab(QWidget):
         self._updating_zoom_sync = False
         self._is_redrawing_plan = False
         # Толщина серой подложки под полилиниями (в пунктах)
-        self.underlay_linewidth = 5
+        self.underlay_linewidth = 15
         # Результаты расчётов для всех полилиний (idx -> result)
         self.polyline_results = {}
         # Параметры, при которых был выполнен последний расчёт (idx -> params_dict)
@@ -403,17 +403,15 @@ class HydraulicTab(QWidget):
                 poly_for_display = self.polylines[selected_idx]
 
             if show_all:
-
-
-
                 for idx, poly in enumerate(self.polylines):
-                    x_vals_bg = [p[0] for p in poly]
-                    y_vals_bg = [p[1] for p in poly]
-                    # Серая подложка (толще для выбранной полилинии)
-                    lw = self.underlay_linewidth + 2 if idx == selected_idx else self.underlay_linewidth
-                    ax_plan.plot(x_vals_bg, y_vals_bg,
-                                 color=self.underlay_color, linewidth=lw,
-                                 solid_capstyle='round', zorder=0)
+                    x_vals = [p[0] for p in poly]
+                    y_vals = [p[1] for p in poly]
+                    # Подложка только для выбранной полилинии
+                    if idx == selected_idx:
+                        ax_plan.plot(x_vals, y_vals,
+                                     color='gray', linewidth=self.underlay_linewidth,
+                                     solid_capstyle='round', zorder=0)
+                    result_for_this = self.polyline_results.get(idx)
                     result_for_this = self.polyline_results.get(idx)
                     if result_for_this is not None:
                         # Рисуем цветные сегменты для этой полилинии
